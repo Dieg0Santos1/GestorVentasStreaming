@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+/* Ajustes globales ligeros para que el layout llene la pantalla */
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
