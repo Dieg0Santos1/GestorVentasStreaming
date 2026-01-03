@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
-import { Plus, Edit2, Trash2, ArrowLeft, Search } from 'lucide-react'
+import { Plus, Edit2, Trash2, ArrowLeft, Search, RefreshCw } from 'lucide-react'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { supabase } from '../lib/supabaseClient'
@@ -62,6 +62,18 @@ function getEstadoCuenta(fechaVencimiento, vendida) {
   }
 }
 
+function addMonths(dateStr, months) {
+  const norm = normalizeDateString(dateStr)
+  if (!norm) return ''
+  const [y, m, d] = norm.split('-')
+  const base = new Date(Number(y), Number(m) - 1, Number(d))
+  base.setMonth(base.getMonth() + Number(months || 0))
+  const ny = base.getFullYear()
+  const nm = String(base.getMonth() + 1).padStart(2, '0')
+  const nd = String(base.getDate()).padStart(2, '0')
+  return `${ny}-${nm}-${nd}`
+}
+
 export function CuentasProveedor() {
   const { user } = useAuth()
   const currency = useCurrency()
@@ -85,6 +97,7 @@ export function CuentasProveedor() {
   const [searchTerm, setSearchTerm] = useState('')
   const [estadoFilter, setEstadoFilter] = useState('all') // all | activa | vendida | vencido
   const [itemsPerPage, setItemsPerPage] = useState(10)
+  const [currentPage, setCurrentPage] = useState(1)
   const [fechaSort, setFechaSort] = useState(null) // null | 'asc' | 'desc'
 
   const [servicioId, setServicioId] = useState('')
@@ -94,9 +107,19 @@ export function CuentasProveedor() {
   const [precioVenta, setPrecioVenta] = useState('')
   const [fechaInicio, setFechaInicio] = useState('')
   const [fechaVencimiento, setFechaVencimiento] = useState('')
+  const [vencimientoIndefinido, setVencimientoIndefinido] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
+
+  // Renovación con proveedor (gastos_cuentas)
+  const [openRenovacionModal, setOpenRenovacionModal] = useState(false)
+  const [cuentaRenovando, setCuentaRenovando] = useState(null)
+  const [mesesRenovacion, setMesesRenovacion] = useState(1)
+  const [fechaManualRenovacion, setFechaManualRenovacion] = useState('')
+  const [montoRenovacion, setMontoRenovacion] = useState('')
+  const [savingRenovacion, setSavingRenovacion] = useState(false)
+  const [renovacionError, setRenovacionError] = useState(null)
 
   const [importLoading, setImportLoading] = useState(false)
   const [importError, setImportError] = useState(null)
@@ -176,8 +199,87 @@ export function CuentasProveedor() {
     setPrecioVenta('')
     setFechaInicio('')
     setFechaVencimiento('')
+    setVencimientoIndefinido(false)
     setFormError(null)
     setEditingId(null)
+  }
+
+  function todayISO() {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return d.toISOString().slice(0, 10)
+  }
+
+  function openRenovacionModalCuenta(cuenta) {
+    if (!cuenta) return
+
+    setCuentaRenovando(cuenta)
+
+    const baseMonto =
+      Number(
+        cuenta.precio_compra != null
+          ? cuenta.precio_compra
+          : cuenta.precio_venta != null
+          ? cuenta.precio_venta
+          : cuenta.precio || 0
+      ) || 0
+
+    setMesesRenovacion(1)
+    setMontoRenovacion(baseMonto ? baseMonto.toFixed(2) : '')
+    setFechaManualRenovacion('')
+    setRenovacionError(null)
+    setOpenRenovacionModal(true)
+  }
+
+  async function handleRenovacionCuentaSubmit(e) {
+    e.preventDefault()
+    setRenovacionError(null)
+    if (!cuentaRenovando) return
+
+    const meses = Number(mesesRenovacion) || 1
+    const monto = parseFloat(montoRenovacion)
+    if (!monto || monto <= 0) {
+      setRenovacionError('El monto de la renovación debe ser mayor a 0')
+      return
+    }
+
+    const baseFecha =
+      normalizeDateString(cuentaRenovando.fecha_vencimiento) || todayISO()
+
+    const fechaVencimientoRenov =
+      fechaManualRenovacion || addMonths(baseFecha, meses)
+
+    setSavingRenovacion(true)
+
+    const { error } = await supabase
+      .from('cuentas_servicios')
+      .update({
+        fecha_vencimiento: fechaVencimientoRenov,
+      })
+      .eq('id', cuentaRenovando.id)
+
+    setSavingRenovacion(false)
+
+    if (error) {
+      setRenovacionError(error.message)
+      return
+    }
+
+    try {
+      await supabase.from('gastos_cuentas').insert({
+        user_id: user.id,
+        cuenta_servicio_id: cuentaRenovando.id,
+        monto,
+        fecha_gasto: new Date().toISOString(),
+        tipo: 'renovacion',
+      })
+    } catch (e) {
+      console.warn('No se pudo registrar gasto de renovación (gastos_cuentas).', e)
+    }
+
+    await fetchCuentas()
+    setOpenRenovacionModal(false)
+    setCuentaRenovando(null)
   }
 
   function openEditModal(cuenta) {
@@ -191,6 +293,7 @@ export function CuentasProveedor() {
     setPrecioVenta(venta != null ? venta.toString() : '')
     setFechaInicio(cuenta.fecha_inicio || '')
     setFechaVencimiento(cuenta.fecha_vencimiento || '')
+    setVencimientoIndefinido(!cuenta.fecha_vencimiento)
     setOpenEditCuenta(true)
   }
 
@@ -210,8 +313,16 @@ export function CuentasProveedor() {
     e.preventDefault()
     setFormError(null)
 
-    if (!servicioId || !correo.trim() || !contrasena.trim() || !precioCompra || !precioVenta || !fechaInicio || !fechaVencimiento) {
-      setFormError('Todos los campos son obligatorios')
+    if (
+      !servicioId ||
+      !correo.trim() ||
+      !contrasena.trim() ||
+      !precioCompra ||
+      !precioVenta ||
+      !fechaInicio ||
+      (!fechaVencimiento && !vencimientoIndefinido)
+    ) {
+      setFormError('Todos los campos son obligatorios (o marca vencimiento indefinido)')
       return
     }
 
@@ -229,7 +340,7 @@ export function CuentasProveedor() {
         precio_compra: parseFloat(precioCompra),
         precio_venta: parseFloat(precioVenta),
         fecha_inicio: fechaInicio,
-        fecha_vencimiento: fechaVencimiento,
+        fecha_vencimiento: vencimientoIndefinido ? null : fechaVencimiento,
       })
       .select(`
         id,
@@ -263,8 +374,16 @@ export function CuentasProveedor() {
 
     if (!editingId) return
 
-    if (!servicioId || !correo.trim() || !contrasena.trim() || !precioCompra || !precioVenta || !fechaInicio || !fechaVencimiento) {
-      setFormError('Todos los campos son obligatorios')
+    if (
+      !servicioId ||
+      !correo.trim() ||
+      !contrasena.trim() ||
+      !precioCompra ||
+      !precioVenta ||
+      !fechaInicio ||
+      (!fechaVencimiento && !vencimientoIndefinido)
+    ) {
+      setFormError('Todos los campos son obligatorios (o marca vencimiento indefinido)')
       return
     }
 
@@ -280,7 +399,7 @@ export function CuentasProveedor() {
         precio_compra: parseFloat(precioCompra),
         precio_venta: parseFloat(precioVenta),
         fecha_inicio: fechaInicio,
-        fecha_vencimiento: fechaVencimiento,
+        fecha_vencimiento: vencimientoIndefinido ? null : fechaVencimiento,
       })
       .eq('id', editingId)
 
@@ -320,6 +439,7 @@ export function CuentasProveedor() {
         PrecioCompra: '5.00',
         PrecioVenta: '8.00',
         FechaInicio: '2025-01-01',
+        // Deja esta columna vacía si la cuenta no tiene fecha de vencimiento (indefinida)
         FechaVencimiento: '2025-02-01',
       },
     ]
@@ -383,6 +503,37 @@ export function CuentasProveedor() {
         return
       }
 
+      // Función para convertir fecha serial de Excel a formato YYYY-MM-DD
+      const convertExcelDate = (value) => {
+        if (!value) return ''
+        
+        // Si ya es una fecha en formato ISO o similar
+        if (typeof value === 'string' && value.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          return value
+        }
+        
+        // Si es un número (fecha serial de Excel)
+        if (typeof value === 'number') {
+          // Excel almacena fechas como días desde 1900-01-01 (con ajuste por error en 1900)
+          const date = new Date((value - 25569) * 86400 * 1000)
+          const year = date.getUTCFullYear()
+          const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+          const day = String(date.getUTCDate()).padStart(2, '0')
+          return `${year}-${month}-${day}`
+        }
+        
+        // Intentar parsear como fecha
+        const parsed = new Date(value)
+        if (!isNaN(parsed.getTime())) {
+          const year = parsed.getFullYear()
+          const month = String(parsed.getMonth() + 1).padStart(2, '0')
+          const day = String(parsed.getDate()).padStart(2, '0')
+          return `${year}-${month}-${day}`
+        }
+        
+        return String(value).trim()
+      }
+
       const registros = []
       for (const row of rows) {
         const servicioNombre = String(row.Servicio || '').trim()
@@ -390,11 +541,12 @@ export function CuentasProveedor() {
         const contrasenaRow = String(row.Contraseña || '').trim()
         const precioCompraRow = String(row.PrecioCompra || '').trim()
         const precioVentaRow = String(row.PrecioVenta || '').trim()
-        const fechaInicioRow = String(row.FechaInicio || '').trim()
-        const fechaVencimientoRow = String(row.FechaVencimiento || '').trim()
+        const fechaInicioRow = convertExcelDate(row.FechaInicio)
+        const fechaVencimientoRow = convertExcelDate(row.FechaVencimiento)
+        const fechaEsIndefinida = !fechaVencimientoRow
 
-        if (!servicioNombre || !correoRow || !contrasenaRow || !precioCompraRow || !precioVentaRow || !fechaInicioRow || !fechaVencimientoRow) {
-          continue // ignorar filas incompletas
+        if (!servicioNombre || !correoRow || !contrasenaRow || !precioCompraRow || !precioVentaRow || !fechaInicioRow) {
+          continue // ignorar filas incompletas (FechaVencimiento ahora puede ir vacía para cuentas indefinidas)
         }
 
         const servicio = servicios.find(
@@ -423,7 +575,7 @@ export function CuentasProveedor() {
           precio_compra: precioCompraNum,
           precio_venta: precioVentaNum,
           fecha_inicio: fechaInicioRow,
-          fecha_vencimiento: fechaVencimientoRow,
+          fecha_vencimiento: fechaEsIndefinida ? null : fechaVencimientoRow,
         })
       }
 
@@ -494,38 +646,49 @@ export function CuentasProveedor() {
     return sorted
   }, [cuentas, searchTerm, estadoFilter, fechaSort])
 
+  useEffect(() => {
+    const computedTotalPages = Math.max(1, Math.ceil(filteredCuentas.length / itemsPerPage))
+    setCurrentPage((prev) => Math.min(prev, computedTotalPages))
+  }, [filteredCuentas.length, itemsPerPage])
+
+  const totalItems = filteredCuentas.length
+  const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage))
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const paginatedCuentas = filteredCuentas.slice(startIndex, startIndex + itemsPerPage)
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 p-6">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-6 py-5">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-center gap-4">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-3 md:px-6 py-4 md:py-5">
+          <div className="flex flex-col gap-3 md:gap-4">
+            {/* Fila 1: Botón regresar e info del proveedor */}
+            <div className="flex items-start gap-2 md:gap-4">
               <button
                 onClick={() => {
                   navigate('/', { state: { initialPage: 'proveedores' } })
                 }}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-sm"
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-2 md:px-3 py-2 text-xs md:text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-sm flex-shrink-0"
               >
-                <ArrowLeft size={18} />
-                Regresar
+                <ArrowLeft size={16} className="md:w-[18px] md:h-[18px]" />
+                <span className="hidden sm:inline">Regresar</span>
               </button>
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shadow-lg">
-                  <span className="text-white font-bold text-lg">
+              <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
+                <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shadow-lg flex-shrink-0">
+                  <span className="text-white font-bold text-base md:text-lg">
                     {proveedor?.usuario?.charAt(0).toUpperCase() || 'P'}
                   </span>
                 </div>
-                <div className="space-y-0.5">
-                  <h1 className="text-xl md:text-2xl font-bold text-slate-900 leading-tight">
+                <div className="space-y-0.5 min-w-0 flex-1">
+                  <h1 className="text-base md:text-xl lg:text-2xl font-bold text-slate-900 leading-tight truncate">
                     {proveedor?.usuario || 'Proveedor'}
                   </h1>
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs md:text-sm text-slate-500">
-                    <span>Cuentas que provee</span>
+                  <div className="flex flex-wrap items-center gap-x-2 md:gap-x-3 gap-y-1 text-[10px] md:text-xs lg:text-sm text-slate-500">
+                    <span className="hidden sm:inline">Cuentas que provee</span>
                     {proveedor?.telefono && (
                       <span className="inline-flex items-center gap-1">
-                        <span className="h-1 w-1 rounded-full bg-slate-300" />
-                        <span>Teléfono: {proveedor.telefono}</span>
+                        <span className="h-1 w-1 rounded-full bg-slate-300 hidden sm:inline" />
+                        <span className="truncate">Tel: {proveedor.telefono}</span>
                       </span>
                     )}
                   </div>
@@ -533,7 +696,8 @@ export function CuentasProveedor() {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 justify-end">
+            {/* Fila 2: Botones de acción */}
+            <div className="flex flex-wrap items-center gap-2 md:gap-3">
               <button
                 type="button"
                 onClick={() => {
@@ -541,15 +705,16 @@ export function CuentasProveedor() {
                   setImportError(null)
                   setImportFileName('')
                 }}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 md:px-4 py-1.5 md:py-2 text-xs md:text-sm font-semibold text-white shadow-sm hover:bg-blue-500 transition-colors flex-shrink-0"
               >
-                Exportar / Importar
+                <span className="hidden sm:inline">Exportar / Importar</span>
+                <span className="sm:hidden">Importar</span>
               </button>
               <button
                 onClick={() => setOpenNewCuenta(true)}
-                className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-purple-600 to-purple-700 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-purple-700 hover:to-purple-800 transition-all"
+                className="inline-flex items-center gap-1.5 md:gap-2 rounded-lg bg-gradient-to-r from-purple-600 to-purple-700 px-3 md:px-5 py-1.5 md:py-2.5 text-xs md:text-sm font-semibold text-white shadow-lg hover:from-purple-700 hover:to-purple-800 transition-all flex-shrink-0"
               >
-                <Plus size={18} />
+                <Plus size={14} className="md:w-[18px] md:h-[18px]" />
                 Añadir cuenta
               </button>
             </div>
@@ -559,20 +724,23 @@ export function CuentasProveedor() {
         {/* Filtros y controles */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 px-4 py-3">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-slate-600 font-medium">Mostrar</span>
-              <select
-                value={itemsPerPage}
-                onChange={(e) => setItemsPerPage(Number(e.target.value))}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
-              >
-                <option value={10}>10</option>
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-              </select>
-              <span className="text-sm text-slate-600">registros</span>
-            </div>
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-slate-600 font-medium">Mostrar</span>
+                <select
+                  value={itemsPerPage}
+                  onChange={(e) => {
+                    setItemsPerPage(Number(e.target.value))
+                    setCurrentPage(1)
+                  }}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <span className="text-sm text-slate-600">registros</span>
+              </div>
 
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-4">
               <div className="flex items-center gap-2">
@@ -583,7 +751,10 @@ export function CuentasProveedor() {
                     type="text"
                     placeholder="Servicio, correo..."
                     value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
+                    onChange={(e) => {
+                      setSearchTerm(e.target.value)
+                      setCurrentPage(1)
+                    }}
                     className="pl-9 pr-3 py-1.5 rounded-lg border border-slate-300 bg-white text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200 w-64"
                   />
                 </div>
@@ -592,7 +763,10 @@ export function CuentasProveedor() {
                 <span className="text-sm text-slate-600 font-medium">Estado:</span>
                 <select
                   value={estadoFilter}
-                  onChange={(e) => setEstadoFilter(e.target.value)}
+                  onChange={(e) => {
+                    setEstadoFilter(e.target.value)
+                    setCurrentPage(1)
+                  }}
                   className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-200"
                 >
                   <option value="all">Todas</option>
@@ -680,7 +854,7 @@ export function CuentasProveedor() {
               )}
 
               {!loading && !error &&
-                filteredCuentas.slice(0, itemsPerPage).map((cuenta, index) => {
+                paginatedCuentas.map((cuenta, index) => {
                   const estado = getEstadoCuenta(cuenta.fecha_vencimiento, cuenta.vendida)
                   const servicioNombre = cuenta.servicios?.nombre || '—'
                   const compra = cuenta.precio_compra ?? cuenta.precio
@@ -689,8 +863,8 @@ export function CuentasProveedor() {
                   return (
                     <tr key={cuenta.id} className="border-t border-slate-100 hover:bg-gradient-to-r hover:from-purple-50 hover:to-slate-50 transition-all">
                       <td className="px-4 py-4 text-center">
-                        <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-100 text-slate-700 font-semibold text-xs">
-                          {index + 1}
+                      <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-100 text-slate-700 font-semibold text-xs">
+                          {startIndex + index + 1}
                         </span>
                       </td>
                       <td className="px-4 py-4 text-slate-900 font-medium">{servicioNombre}</td>
@@ -729,31 +903,184 @@ export function CuentasProveedor() {
                           {estado.label.toUpperCase()}
                         </span>
                       </td>
-                      <td className="px-4 py-4 whitespace-nowrap">
-                        <div className="flex items-center justify-center gap-2">
-                          <button
-                            onClick={() => openEditModal(cuenta)}
-                            className="p-2 rounded-lg bg-cyan-500 text-white hover:bg-cyan-600 transition-colors shadow-sm"
-                            title="Editar"
-                          >
-                            <Edit2 size={16} />
-                          </button>
-                          <button
-                            onClick={() => confirmDelete(cuenta)}
-                            className="p-2 rounded-lg bg-rose-500 text-white hover:bg-rose-600 transition-colors shadow-sm"
-                            title="Eliminar"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
+                  <td className="px-4 py-4 whitespace-nowrap">
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        onClick={() => openRenovacionModalCuenta(cuenta)}
+                        className="p-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm"
+                        title="Registrar renovación con proveedor"
+                      >
+                        <RefreshCw size={16} />
+                      </button>
+                      <button
+                        onClick={() => openEditModal(cuenta)}
+                        className="p-2 rounded-lg bg-cyan-500 text-white hover:bg-cyan-600 transition-colors shadow-sm"
+                        title="Editar"
+                      >
+                        <Edit2 size={16} />
+                      </button>
+                      <button
+                        onClick={() => confirmDelete(cuenta)}
+                        className="p-2 rounded-lg bg-rose-500 text-white hover:bg-rose-600 transition-colors shadow-sm"
+                        title="Eliminar"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </td>
                     </tr>
                   )
                 })}
             </tbody>
             </table>
           </div>
+          {!loading && !error && totalItems > 0 && (
+            <div className="flex flex-col md:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-slate-200 bg-gradient-to-r from-slate-50 via-purple-50/40 to-slate-50">
+              <p className="text-xs text-slate-600">
+                Mostrando{' '}
+                <span className="font-semibold text-slate-800">
+                  {startIndex + 1}–{Math.min(startIndex + itemsPerPage, totalItems)}
+                </span>{' '}
+                de{' '}
+                <span className="font-semibold text-slate-800">{totalItems}</span> cuentas
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage === 1}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  ‹ Anterior
+                </button>
+                <span className="text-xs font-medium text-slate-700 bg-slate-800 text-white px-3 py-1.5 rounded-full shadow-sm">
+                  Página {currentPage} de {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage === totalPages}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-purple-500 bg-purple-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-purple-500 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  Siguiente ›
+                </button>
+              </div>
+            </div>
+          )}
         </div>
+
+        {/* Modal Renovación proveedor */}
+        <Modal
+          open={openRenovacionModal}
+          title="Renovación de cuenta con proveedor"
+          onClose={() => {
+            setOpenRenovacionModal(false)
+            setCuentaRenovando(null)
+            setRenovacionError(null)
+          }}
+        >
+          <form className="space-y-4" onSubmit={handleRenovacionCuentaSubmit}>
+            {cuentaRenovando && (
+              <div className="text-xs text-slate-600 space-y-1">
+                <p>
+                  <span className="font-semibold">Servicio:</span>{' '}
+                  {cuentaRenovando.servicios?.nombre || '—'}
+                </p>
+                <p>
+                  <span className="font-semibold">Cuenta:</span>{' '}
+                  {cuentaRenovando.correo || '—'}
+                </p>
+                <p>
+                  <span className="font-semibold">Vence actual:</span>{' '}
+                  {formatDateDisplay(cuentaRenovando.fecha_vencimiento)}
+                </p>
+              </div>
+            )}
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-medium text-slate-600">Meses a renovar</span>
+                <select
+                  value={mesesRenovacion}
+                  onChange={(e) => {
+                    const value = Number(e.target.value) || 1
+                    setMesesRenovacion(value)
+                    if (cuentaRenovando) {
+                      const baseMonto =
+                        Number(
+                          cuentaRenovando.precio_compra != null
+                            ? cuentaRenovando.precio_compra
+                            : cuentaRenovando.precio_venta != null
+                            ? cuentaRenovando.precio_venta
+                            : cuentaRenovando.precio || 0
+                        ) || 0
+                      if (baseMonto > 0) {
+                        setMontoRenovacion((baseMonto * value).toFixed(2))
+                      }
+                    }
+                  }}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                >
+                  <option value={1}>1 mes</option>
+                  <option value={2}>2 meses</option>
+                  <option value={3}>3 meses</option>
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-medium text-slate-600">
+                  Fecha de vencimiento (opcional, manual)
+                </span>
+                <input
+                  type="date"
+                  value={fechaManualRenovacion}
+                  onChange={(e) => setFechaManualRenovacion(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                />
+                <p className="text-[11px] text-slate-400">
+                  Si no eliges una fecha, se calculará sumando los meses al vencimiento actual.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-medium text-slate-600">Monto de renovación</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={montoRenovacion}
+                  onChange={(e) => setMontoRenovacion(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                />
+                <p className="text-[11px] text-slate-400">
+                  Por defecto es el precio de compra actual multiplicado por los meses seleccionados.
+                </p>
+              </div>
+            </div>
+
+            {renovacionError && <p className="text-sm text-rose-500">{renovacionError}</p>}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenRenovacionModal(false)
+                  setCuentaRenovando(null)
+                  setRenovacionError(null)
+                }}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={savingRenovacion}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-500 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {savingRenovacion ? 'Guardando...' : 'Registrar renovación'}
+              </button>
+            </div>
+          </form>
+        </Modal>
 
         {/* Modal Nueva cuenta */}
         <Modal
@@ -817,12 +1144,28 @@ export function CuentasProveedor() {
                 onChange={(e) => setFechaInicio(e.target.value)}
                 className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
               />
-              <input
-                type="date"
-                value={fechaVencimiento}
-                onChange={(e) => setFechaVencimiento(e.target.value)}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
-              />
+              <div className="space-y-2">
+                <input
+                  type="date"
+                  value={fechaVencimiento}
+                  onChange={(e) => setFechaVencimiento(e.target.value)}
+                  disabled={vencimientoIndefinido}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:bg-slate-50 disabled:text-slate-400"
+                />
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={vencimientoIndefinido}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      setVencimientoIndefinido(checked)
+                      if (checked) setFechaVencimiento('')
+                    }}
+                    className="rounded border-slate-300 text-purple-600 focus:ring-purple-500"
+                  />
+                  <span>Sin fecha de vencimiento (indefinida)</span>
+                </label>
+              </div>
             </div>
 
             {formError && <p className="text-sm text-rose-500">{formError}</p>}
@@ -911,12 +1254,28 @@ export function CuentasProveedor() {
                 onChange={(e) => setFechaInicio(e.target.value)}
                 className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
               />
-              <input
-                type="date"
-                value={fechaVencimiento}
-                onChange={(e) => setFechaVencimiento(e.target.value)}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
-              />
+              <div className="space-y-2">
+                <input
+                  type="date"
+                  value={fechaVencimiento}
+                  onChange={(e) => setFechaVencimiento(e.target.value)}
+                  disabled={vencimientoIndefinido}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:bg-slate-50 disabled:text-slate-400"
+                />
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={vencimientoIndefinido}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      setVencimientoIndefinido(checked)
+                      if (checked) setFechaVencimiento('')
+                    }}
+                    className="rounded border-slate-300 text-purple-600 focus:ring-purple-500"
+                  />
+                  <span>Sin fecha de vencimiento (indefinida)</span>
+                </label>
+              </div>
             </div>
 
             {formError && <p className="text-sm text-rose-500">{formError}</p>}

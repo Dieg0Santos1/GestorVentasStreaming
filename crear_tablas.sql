@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS cuentas_servicios (
   correo VARCHAR(255) NOT NULL,
   contrasena VARCHAR(255) NOT NULL,
   precio DECIMAL(10, 2) NOT NULL,
-  fecha_vencimiento DATE NOT NULL,
+  -- Puede ser NULL cuando la cuenta no tiene vencimiento definido (indefinida)
+  fecha_vencimiento DATE,
   creado_en TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   CONSTRAINT unique_correo_servicio UNIQUE (servicio_id, correo)
 );

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Edit2, Trash2, Plus, RefreshCw, SendHorizontal, MessageCircle } from 'lucide-react'
+import { FilterableSelect } from '../components/common/FilterableSelect'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { supabase } from '../lib/supabaseClient'
@@ -8,6 +9,7 @@ import { useAuth } from '../context/AuthContext'
 import { useCurrency } from '../hooks/useCurrency'
 import { formatMoney } from '../lib/money'
 import { openWhatsApp, validateWhatsAppPhone } from '../lib/whatsapp'
+import { inferServiceKeyFromName } from '../lib/textUtils'
 import * as XLSX from 'xlsx'
 
 function normalizeDateString(value) {
@@ -540,6 +542,8 @@ export function VentasCliente() {
 
       const cuenta = venta?.cuentas_servicios
       const servicioNombre = cuenta?.servicios?.nombre || 'Servicio'
+      const serviceKey = inferServiceKeyFromName(servicioNombre)
+      const ocultarCredenciales = serviceKey === 'spotify' || serviceKey === 'youtube'
 
       const { data: configData } = await supabase
         .from('configuraciones_usuario')
@@ -565,8 +569,8 @@ export function VentasCliente() {
       const datosAcceso = [
         `Servicio: ${servicioNombre}`,
         `Tipo: ${tipo}`,
-        `Cuenta: ${cuenta?.correo || '—'}`,
-        `Contraseña: ${cuenta?.contrasena || '—'}`,
+        !ocultarCredenciales ? `Cuenta: ${cuenta?.correo || '—'}` : null,
+        !ocultarCredenciales ? `Contraseña: ${cuenta?.contrasena || '—'}` : null,
         perfilLine,
         pinLine,
         `Vence: ${formatDateDisplay(fechaVence)}`,
@@ -631,6 +635,8 @@ export function VentasCliente() {
       const lines = (ventas || []).map((v, idx) => {
         const cuenta = v.cuentas_servicios
         const servicioNombre = cuenta?.servicios?.nombre || 'Servicio'
+        const serviceKey = inferServiceKeyFromName(servicioNombre)
+        const ocultarCredenciales = serviceKey === 'spotify' || serviceKey === 'youtube'
         const fechaV = v.fecha_vencimiento || null
         const estado = getEstadoVenta(fechaV).label
         const tipo = v?.perfil_id ? 'Perfil' : 'Cuenta completa'
@@ -641,8 +647,8 @@ export function VentasCliente() {
 
         return [
           `${idx + 1}) ${servicioNombre} - ${tipo}${perfilTxt ? ` ${perfilTxt}` : ''}`,
-          `   Cuenta: ${cuenta?.correo || '—'}`,
-          `   Contraseña: ${cuenta?.contrasena || '—'}`,
+          !ocultarCredenciales ? `   Cuenta: ${cuenta?.correo || '—'}` : null,
+          !ocultarCredenciales ? `   Contraseña: ${cuenta?.contrasena || '—'}` : null,
           pinTxt,
           `   Vence: ${formatDateDisplay(fechaV)} (${estado})`,
           `   Monto: ${formatMoney(v?.monto || 0, currency, { maximumFractionDigits: 2 })}`,
@@ -956,12 +962,43 @@ export function VentasCliente() {
       const registrosVentas = []
       const cuentasKeys = []
 
+      // Función para convertir fecha serial de Excel a formato YYYY-MM-DD
+      const convertExcelDate = (value) => {
+        if (!value) return ''
+        
+        // Si ya es una fecha en formato ISO o similar
+        if (typeof value === 'string' && value.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          return value
+        }
+        
+        // Si es un número (fecha serial de Excel)
+        if (typeof value === 'number') {
+          // Excel almacena fechas como días desde 1900-01-01 (con ajuste por error en 1900)
+          const date = new Date((value - 25569) * 86400 * 1000)
+          const year = date.getUTCFullYear()
+          const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+          const day = String(date.getUTCDate()).padStart(2, '0')
+          return `${year}-${month}-${day}`
+        }
+        
+        // Intentar parsear como fecha
+        const parsed = new Date(value)
+        if (!isNaN(parsed.getTime())) {
+          const year = parsed.getFullYear()
+          const month = String(parsed.getMonth() + 1).padStart(2, '0')
+          const day = String(parsed.getDate()).padStart(2, '0')
+          return `${year}-${month}-${day}`
+        }
+        
+        return String(value).trim()
+      }
+
       for (const row of rows) {
         const servicioNombre = String(row.Servicio || '').trim()
         const correoCuenta = String(row.CorreoCuenta || '').trim()
         const precioVentaRow = String(row.PrecioVenta || '').trim()
-        const fechaInicioRow = String(row.FechaInicio || '').trim()
-        const fechaVencimientoRow = String(row.FechaVencimiento || '').trim()
+        const fechaInicioRow = convertExcelDate(row.FechaInicio)
+        const fechaVencimientoRow = convertExcelDate(row.FechaVencimiento)
 
         if (!servicioNombre || !correoCuenta || !precioVentaRow || !fechaInicioRow || !fechaVencimientoRow) {
           continue
@@ -1105,30 +1142,31 @@ export function VentasCliente() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 p-6">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-6 py-5">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-center gap-4">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-3 md:px-6 py-4 md:py-5">
+          <div className="flex flex-col gap-3 md:gap-4">
+            {/* Fila 1: Botón regresar e info del cliente */}
+            <div className="flex items-start gap-2 md:gap-4">
               <button
                 onClick={() => navigate('/', { state: { initialPage: 'clientes' } })}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-sm"
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-2 md:px-3 py-2 text-xs md:text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-sm flex-shrink-0"
               >
-                <ArrowLeft size={18} />
-                Regresar
+                <ArrowLeft size={16} className="md:w-[18px] md:h-[18px]" />
+                <span className="hidden sm:inline">Regresar</span>
               </button>
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-lg">
-                  <span className="text-white font-bold text-lg">👥</span>
+              <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
+                <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-lg flex-shrink-0">
+                  <span className="text-white font-bold text-base md:text-lg">👥</span>
                 </div>
-                <div className="space-y-0.5">
-                  <h1 className="text-xl md:text-2xl font-bold text-slate-900 leading-tight">
+                <div className="space-y-0.5 min-w-0 flex-1">
+                  <h1 className="text-base md:text-xl lg:text-2xl font-bold text-slate-900 leading-tight truncate">
                     {cliente ? `${cliente.nombre} ${cliente.apellido}` : 'Cliente'}
                   </h1>
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs md:text-sm text-slate-500">
-                    <span>Historial de ventas</span>
+                  <div className="flex flex-wrap items-center gap-x-2 md:gap-x-3 gap-y-1 text-[10px] md:text-xs lg:text-sm text-slate-500">
+                    <span className="hidden sm:inline">Historial de ventas</span>
                     {cliente?.telefono && (
                       <span className="inline-flex items-center gap-1">
-                        <span className="h-1 w-1 rounded-full bg-slate-300" />
-                        <span>Teléfono: {cliente.telefono}</span>
+                        <span className="h-1 w-1 rounded-full bg-slate-300 hidden sm:inline" />
+                        <span className="truncate">Tel: {cliente.telefono}</span>
                       </span>
                     )}
                   </div>
@@ -1136,19 +1174,21 @@ export function VentasCliente() {
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 justify-end">
+            {/* Fila 2: Botones de acción */}
+            <div className="flex flex-wrap items-center gap-2 md:gap-3">
               <button
                 type="button"
                 onClick={handleEnvioGeneral}
                 disabled={sendingGeneral || !ventas || ventas.length === 0}
-                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                className="inline-flex items-center gap-1.5 md:gap-2 rounded-lg bg-emerald-600 px-3 md:px-4 py-1.5 md:py-2 text-xs md:text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex-shrink-0"
               >
                 {sendingGeneral ? (
-                  <span className="h-4 w-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                  <span className="h-3 w-3 md:h-4 md:w-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
                 ) : (
-                  <SendHorizontal size={18} />
+                  <SendHorizontal size={14} className="md:w-[18px] md:h-[18px]" />
                 )}
-                Envío General
+                <span className="hidden sm:inline">Envío General</span>
+                <span className="sm:hidden">Enviar</span>
               </button>
               <button
                 type="button"
@@ -1157,21 +1197,21 @@ export function VentasCliente() {
                   setImportError(null)
                   setImportFileName('')
                 }}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 md:px-4 py-1.5 md:py-2 text-xs md:text-sm font-semibold text-white shadow-sm hover:bg-blue-500 transition-colors flex-shrink-0"
               >
-                Exportar / Importar
+                <span className="hidden sm:inline">Exportar / Importar</span>
+                <span className="sm:hidden">Importar</span>
               </button>
               <button
                 type="button"
                 onClick={openNewVentaModal}
-                className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-blue-600 to-blue-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:from-blue-700 hover:to-blue-800 transition-colors"
+                className="inline-flex items-center gap-1.5 md:gap-2 rounded-lg bg-gradient-to-r from-blue-600 to-blue-700 px-3 md:px-4 py-1.5 md:py-2 text-xs md:text-sm font-semibold text-white shadow-sm hover:from-blue-700 hover:to-blue-800 transition-colors flex-shrink-0"
               >
-                <Plus size={18} />
+                <Plus size={14} className="md:w-[18px] md:h-[18px]" />
                 Nueva Venta
               </button>
             </div>
           </div>
-
         </div>
 
         {/* Filtros */}
@@ -1704,20 +1744,17 @@ export function VentasCliente() {
               ))}
             </select>
 
-            <select
+            <FilterableSelect
               value={cuentaId}
-              onChange={async (e) => {
-                const value = e.target.value
+              onChange={async (value) => {
+                const cuenta = cuentasServicioSeleccionado.find((c) => c.id === value)
                 setCuentaId(value)
                 setPerfilesDisponibles([])
                 setPerfilId('')
-                const cuenta = cuentasServicioSeleccionado.find((c) => c.id === value)
                 if (cuenta) {
                   setPrecioVenta(cuenta.precio.toString())
-                  // La fecha de vencimiento de la VENTA es independiente de la fecha de vencimiento de la CUENTA.
                   const tienePerfilVendido = cuentasConPerfilVendidoIds.includes(cuenta.id)
                   if (tienePerfilVendido) {
-                    // Si ya hay perfiles vendidos, forzamos modo perfil y cargamos perfiles libres
                     setModoVenta('perfil')
                     await fetchPerfilesLibresByCuenta(value)
                   } else if (modoVenta === 'perfil') {
@@ -1725,16 +1762,14 @@ export function VentasCliente() {
                   }
                 }
               }}
+              options={cuentasServicioSeleccionado}
+              placeholder="Escribe o selecciona una cuenta..."
               disabled={!servicioId}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 md:col-span-2 disabled:bg-slate-50 disabled:text-slate-400"
-            >
-              <option value="">Selecciona cuenta disponible</option>
-              {cuentasServicioSeleccionado.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.correo}
-                </option>
-              ))}
-            </select>
+              className="md:col-span-2"
+              getOptionValue={(c) => c.id}
+              getOptionLabel={(c) => c.correo}
+              renderOption={(c) => <span className="font-mono text-xs">{c.correo}</span>}
+            />
 
             <div className="md:col-span-2 grid gap-3 md:grid-cols-2">
               <div className="flex flex-col gap-1">

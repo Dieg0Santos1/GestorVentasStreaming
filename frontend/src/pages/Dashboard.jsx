@@ -30,6 +30,7 @@ export function Dashboard() {
   const [ventas, setVentas] = useState([])
   const [pagosVentas, setPagosVentas] = useState([])
   const [cuentas, setCuentas] = useState([])
+  const [gastosCuentas, setGastosCuentas] = useState([])
   const [servicios, setServicios] = useState([])
   const [selectedServicioId, setSelectedServicioId] = useState('all')
 
@@ -43,7 +44,7 @@ export function Dashboard() {
       setLoading(true)
       setError(null)
 
-      const [ventasRes, cuentasRes, pagosRes] = await Promise.all([
+      const [ventasRes, cuentasRes, pagosRes, gastosRes] = await Promise.all([
         supabase
           .from('ventas')
           .select('id, monto, fecha_venta, fecha_vencimiento, cuenta_servicio_id')
@@ -60,6 +61,12 @@ export function Dashboard() {
           .select('id, monto, fecha_pago')
           .eq('user_id', user.id)
           .order('fecha_pago', { ascending: true }),
+        // gastos_cuentas: registro explícito de gastos (compra inicial + renovaciones con proveedor).
+        supabase
+          .from('gastos_cuentas')
+          .select('id, monto, fecha_gasto')
+          .eq('user_id', user.id)
+          .order('fecha_gasto', { ascending: true }),
       ])
 
       if (ventasRes.error) {
@@ -73,6 +80,13 @@ export function Dashboard() {
         setPagosVentas([])
       } else {
         setPagosVentas(pagosRes?.data || [])
+      }
+
+      // gastos_cuentas: si falla, usamos solo precio_compra de cuentas como fallback.
+      if (gastosRes?.error) {
+        setGastosCuentas([])
+      } else {
+        setGastosCuentas(gastosRes?.data || [])
       }
 
       if (cuentasRes.error) {
@@ -131,21 +145,37 @@ export function Dashboard() {
       }
     }
 
-    // Gastos: compras a proveedores (precio_compra) agrupadas por fecha_inicio de la cuenta.
-    for (const c of cuentas) {
-      const monto = Number(c.precio_compra)
-      if (!monto || monto <= 0) continue
-      if (!c.fecha_inicio) continue
-      const fecha = new Date(c.fecha_inicio)
-      if (fecha.getFullYear() !== year) continue
-      const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
-      if (map.has(key)) {
-        map.get(key).gastos += monto
+    // Gastos:
+    // 1) Preferimos registros explícitos en gastos_cuentas (compra inicial + renovaciones).
+    // 2) Si no hay datos, usamos como fallback precio_compra/fecha_inicio de las cuentas.
+    if (gastosCuentas && gastosCuentas.length > 0) {
+      for (const g of gastosCuentas) {
+        const monto = Number(g.monto)
+        if (!monto || monto <= 0) continue
+        if (!g.fecha_gasto) continue
+        const fecha = new Date(g.fecha_gasto)
+        if (fecha.getFullYear() !== year) continue
+        const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
+        if (map.has(key)) {
+          map.get(key).gastos += monto
+        }
+      }
+    } else {
+      for (const c of cuentas) {
+        const monto = Number(c.precio_compra)
+        if (!monto || monto <= 0) continue
+        if (!c.fecha_inicio) continue
+        const fecha = new Date(c.fecha_inicio)
+        if (fecha.getFullYear() !== year) continue
+        const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
+        if (map.has(key)) {
+          map.get(key).gastos += monto
+        }
       }
     }
 
     return buckets
-  }, [ventas, pagosVentas, cuentas])
+  }, [ventas, pagosVentas, cuentas, gastosCuentas])
 
   const maxMonthlyTotal = useMemo(() => {
     const values = monthlyBalance.flatMap((m) => [m.ventas, m.gastos])
@@ -282,8 +312,9 @@ export function Dashboard() {
 
         <div className="relative h-72 md:h-80">
           <div className="absolute inset-0 bg-gradient-to-t from-slate-500/10 via-transparent to-transparent rounded-xl border border-slate-300/30" />
-          <div className="absolute inset-x-4 inset-y-6 flex items-end justify-between gap-2">
-            {monthlyBalance.map((month) => {
+          <div className="absolute inset-0 overflow-x-auto md:overflow-x-visible">
+            <div className="absolute inset-y-6 left-4 right-4 md:inset-x-4 flex items-end justify-between gap-2 min-w-[600px] md:min-w-0">
+              {monthlyBalance.map((month) => {
               const rVentas = maxMonthlyTotal ? month.ventas / maxMonthlyTotal : 0
               const rGastos = maxMonthlyTotal ? month.gastos / maxMonthlyTotal : 0
               const hVentas = rVentas > 0 ? 28 + rVentas * 150 : 0
@@ -322,9 +353,13 @@ export function Dashboard() {
                   <span className="text-[11px] font-medium text-slate-600">{month.label}</span>
                 </div>
               )
-            })}
+              })}
+            </div>
           </div>
         </div>
+        <p className="text-[10px] text-slate-400 text-center mt-2 md:hidden">
+          Desliza horizontalmente para ver todos los meses
+        </p>
       </section>
 
       {/* Gráfico circular de cuentas por estado */}

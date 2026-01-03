@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { supabase } from '../lib/supabaseClient'
-import { Plus, Edit2, Trash2 } from 'lucide-react'
+import { Plus, Edit2, Trash2, Search } from 'lucide-react'
 import { capitalize } from '../lib/textUtils'
 import { validateWhatsAppPhone } from '../lib/whatsapp'
 import { useAuth } from '../context/AuthContext'
@@ -15,6 +15,7 @@ export function Clientes() {
   const [openEditCliente, setOpenEditCliente] = useState(false)
   const [openDeleteModal, setOpenDeleteModal] = useState(false)
   const [deleteId, setDeleteId] = useState(null)
+  const [deleteMode, setDeleteMode] = useState('normal') // 'normal' | 'blocked'
   const [clientes, setClientes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -23,9 +24,11 @@ export function Clientes() {
   const [apellido, setApellido] = useState('')
   const [telefono, setTelefono] = useState('')
   const [correo, setCorreo] = useState('')
+  const [claveAcceso, setClaveAcceso] = useState('') // Clave para Sistema de Códigos
   const [editingId, setEditingId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
+  const [searchTerm, setSearchTerm] = useState('')
 
   useEffect(() => {
     async function fetchClientes() {
@@ -33,7 +36,7 @@ export function Clientes() {
       setError(null)
       const { data, error } = await supabase
         .from('clientes')
-        .select('id, nombre, apellido, telefono, correo, creado_en')
+        .select('id, nombre, apellido, telefono, correo, clave_acceso, creado_en')
         .order('creado_en', { ascending: false })
 
       if (error) {
@@ -52,8 +55,8 @@ export function Clientes() {
     e.preventDefault()
     setFormError(null)
 
-    if (!nombre.trim() || !apellido.trim()) {
-      setFormError('Nombre y apellido son obligatorios')
+    if (!nombre.trim() || !apellido.trim() || !claveAcceso.trim()) {
+      setFormError('Nombre, apellido y clave de acceso son obligatorios')
       return
     }
 
@@ -74,8 +77,9 @@ export function Clientes() {
         apellido: capitalize(apellido.trim()), 
         telefono: telefono.trim() || null,
         correo: correo.trim() || null,
+        clave_acceso: claveAcceso.trim(),
       })
-      .select('id, nombre, apellido, telefono, correo, creado_en')
+      .select('id, nombre, apellido, telefono, correo, clave_acceso, creado_en')
       .single()
 
     setSaving(false)
@@ -90,6 +94,7 @@ export function Clientes() {
     setApellido('')
     setTelefono('')
     setCorreo('')
+    setClaveAcceso('')
     setOpenNewCliente(false)
   }
 
@@ -118,6 +123,8 @@ export function Clientes() {
         apellido: capitalize(apellido.trim()), 
         telefono: telefono.trim() || null,
         correo: correo.trim() || null,
+        // Si se ingresa una nueva clave, se actualiza; si se deja vacío, se mantiene la existente
+        ...(claveAcceso.trim() ? { clave_acceso: claveAcceso.trim() } : {}),
       })
       .eq('id', editingId)
 
@@ -145,6 +152,7 @@ export function Clientes() {
     setApellido('')
     setTelefono('')
     setCorreo('')
+    setClaveAcceso('')
     setEditingId(null)
     setOpenEditCliente(false)
   }
@@ -155,11 +163,13 @@ export function Clientes() {
     setApellido(cliente.apellido)
     setTelefono(cliente.telefono || '')
     setCorreo(cliente.correo || '')
+    setClaveAcceso('')
     setOpenEditCliente(true)
   }
 
   function confirmDelete(id) {
     setDeleteId(id)
+    setDeleteMode('normal')
     setOpenDeleteModal(true)
   }
 
@@ -170,18 +180,49 @@ export function Clientes() {
   async function handleDelete() {
     if (!deleteId) return
 
+    // Verificar si el cliente tiene ventas registradas
+    const { count, error: ventasError } = await supabase
+      .from('ventas')
+      .select('id', { count: 'exact', head: true })
+      .eq('cliente_id', deleteId)
+
+    if (!ventasError && (count || 0) > 0) {
+      const msg = 'No se puede eliminar este cliente porque tiene ventas registradas. Primero gestiona o elimina esas ventas.'
+      setFormError(msg)
+      setDeleteMode('blocked')
+      return
+    }
+
     const { error } = await supabase.from('clientes').delete().eq('id', deleteId)
 
     if (error) {
       setFormError('Error al eliminar: ' + error.message)
       setOpenDeleteModal(false)
+      setDeleteMode('normal')
+      setDeleteId(null)
       return
     }
 
     setClientes((prev) => prev.filter((c) => c.id !== deleteId))
     setOpenDeleteModal(false)
     setDeleteId(null)
+    setDeleteMode('normal')
   }
+
+  const clientesFiltrados = clientes.filter((cliente) => {
+    const term = searchTerm.trim().toLowerCase()
+    if (!term) return true
+    const nombreCompleto = `${cliente.nombre} ${cliente.apellido}`.toLowerCase()
+    const telefono = (cliente.telefono || '').toLowerCase()
+    const correo = (cliente.correo || '').toLowerCase()
+    const claveAcceso = (cliente.clave_acceso || '').toLowerCase()
+    return (
+      nombreCompleto.includes(term) ||
+      telefono.includes(term) ||
+      correo.includes(term) ||
+      claveAcceso.includes(term)
+    )
+  })
 
   return (
     <div className="space-y-6">
@@ -196,8 +237,22 @@ export function Clientes() {
         </button>
       </div>
 
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1 max-w-md">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <input
+            type="text"
+            placeholder="Buscar por nombre, teléfono, correo o clave..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full rounded-lg border border-slate-300 bg-white pl-10 pr-4 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+        </div>
+      </div>
+
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-        <table className="min-w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="min-w-[900px] w-full text-sm">
           <thead className="bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700">
             <tr>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">#</th>
@@ -205,6 +260,7 @@ export function Clientes() {
               <th className="px-4 py-4 text-left font-bold text-white uppercase tracking-wide text-xs">Apellido</th>
               <th className="px-4 py-4 text-left font-bold text-white uppercase tracking-wide text-xs">Teléfono</th>
               <th className="px-4 py-4 text-left font-bold text-white uppercase tracking-wide text-xs">Correo</th>
+              <th className="px-4 py-4 text-left font-bold text-white uppercase tracking-wide text-xs">Clave acceso</th>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">Ventas</th>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">Acciones</th>
             </tr>
@@ -212,7 +268,7 @@ export function Clientes() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">
                   Cargando clientes...
                 </td>
               </tr>
@@ -220,7 +276,7 @@ export function Clientes() {
 
             {!loading && error && (
               <tr>
-                <td colSpan={6} className="px-4 py-6 text-center text-sm text-rose-500">
+                <td colSpan={7} className="px-4 py-6 text-center text-sm text-rose-500">
                   Error al cargar clientes: {error}
                 </td>
               </tr>
@@ -228,14 +284,22 @@ export function Clientes() {
 
             {!loading && !error && clientes.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">
+                <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">
                   Aún no hay clientes registrados.
                 </td>
               </tr>
             )}
 
-            {!loading && !error &&
-              clientes.map((cliente, index) => (
+            {!loading && !error && clientes.length > 0 && clientesFiltrados.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-4 py-6 text-center text-sm text-slate-500">
+                  No se encontraron clientes que coincidan con la búsqueda.
+                </td>
+              </tr>
+            )}
+
+            {!loading && !error && clientesFiltrados.length > 0 &&
+              clientesFiltrados.map((cliente, index) => (
                 <tr key={cliente.id} className="border-t border-slate-100 hover:bg-gradient-to-r hover:from-blue-50 hover:to-slate-50 transition-all">
                   <td className="px-4 py-4 text-center">
                     <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-100 text-slate-700 font-semibold text-xs">
@@ -253,6 +317,9 @@ export function Clientes() {
                   <td className="px-4 py-4 text-slate-900 font-medium">{cliente.apellido}</td>
                   <td className="px-4 py-4 text-slate-600">{cliente.telefono || '—'}</td>
                   <td className="px-4 py-4 text-slate-600">{cliente.correo || '—'}</td>
+                  <td className="px-4 py-4 text-slate-700 font-mono text-xs">
+                    {cliente.clave_acceso || '—'}
+                  </td>
                   <td className="px-4 py-4 text-center">
                     <button
                       onClick={() => handleGestionarVentas(cliente)}
@@ -283,6 +350,7 @@ export function Clientes() {
               ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <Modal open={openNewCliente} title="Nuevo Cliente" onClose={() => setOpenNewCliente(false)}>
@@ -318,6 +386,18 @@ export function Clientes() {
               onChange={(e) => setCorreo(e.target.value)}
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
+            <div className="space-y-1 md:col-span-2">
+              <input
+                type="text"
+                placeholder="Clave de acceso (Sistema de Códigos)"
+                value={claveAcceso}
+                onChange={(e) => setClaveAcceso(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-slate-500">
+                El cliente usará esta clave para consultar sus códigos y mensajes.
+              </p>
+            </div>
           </div>
 
           {formError && (
@@ -376,6 +456,18 @@ export function Clientes() {
               onChange={(e) => setCorreo(e.target.value)}
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
+            <div className="space-y-1 md:col-span-2">
+              <input
+                type="text"
+                placeholder="Nueva clave de acceso"
+                value={claveAcceso}
+                onChange={(e) => setClaveAcceso(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-slate-500">
+                Si cambias la clave, el cliente deberá usar la nueva para consultar sus códigos.
+              </p>
+            </div>
           </div>
 
           {formError && (
@@ -403,12 +495,32 @@ export function Clientes() {
 
       <ConfirmModal
         open={openDeleteModal}
-        onClose={() => { setOpenDeleteModal(false); setDeleteId(null); }}
-        onConfirm={handleDelete}
-        title="¿Eliminar Cliente?"
-        message="Esta acción no se puede deshacer. El cliente será eliminado permanentemente."
-        confirmText="Eliminar"
-        type="danger"
+        onClose={() => {
+          setOpenDeleteModal(false)
+          setDeleteId(null)
+          setDeleteMode('normal')
+        }}
+        onConfirm={
+          deleteMode === 'normal'
+            ? handleDelete
+            : () => {
+                setOpenDeleteModal(false)
+                setDeleteMode('normal')
+                setDeleteId(null)
+              }
+        }
+        title={
+          deleteMode === 'normal'
+            ? '¿Eliminar Cliente?'
+            : 'No se puede eliminar este cliente'
+        }
+        message={
+          deleteMode === 'normal'
+            ? 'Esta acción no se puede deshacer. El cliente será eliminado permanentemente.'
+            : 'Este cliente tiene ventas registradas y no se puede eliminar. Primero gestiona o elimina esas ventas.'
+        }
+        confirmText={deleteMode === 'normal' ? 'Eliminar' : 'Entendido'}
+        type={deleteMode === 'normal' ? 'danger' : 'info'}
       />
     </div>
   )

@@ -4,7 +4,7 @@ import { Plus, Edit2, Trash2, Settings } from 'lucide-react'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { supabase } from '../lib/supabaseClient'
-import { capitalize } from '../lib/textUtils'
+import { capitalize, inferServiceKeyFromName } from '../lib/textUtils'
 import { useAuth } from '../context/AuthContext'
 
 export function Servicios() {
@@ -14,6 +14,7 @@ export function Servicios() {
   const [openEditServicio, setOpenEditServicio] = useState(false)
   const [openDeleteModal, setOpenDeleteModal] = useState(false)
   const [deleteId, setDeleteId] = useState(null)
+  const [deleteMode, setDeleteMode] = useState('normal') // 'normal' | 'blocked'
   const [servicios, setServicios] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -55,9 +56,19 @@ export function Servicios() {
     }
 
     setSaving(true)
+    const rawName = nombre.trim()
+    const capitalized = capitalize(rawName)
+    const serviceKey = inferServiceKeyFromName(rawName)
+
+    const insertPayload = {
+      nombre: capitalized,
+      user_id: user.id,
+      ...(serviceKey ? { service_key: serviceKey } : {}),
+    }
+
     const { data, error } = await supabase
       .from('servicios')
-      .insert({ nombre: capitalize(nombre.trim()), user_id: user.id })
+      .insert(insertPayload)
       .select('id, nombre, creado_en')
       .single()
 
@@ -88,9 +99,18 @@ export function Servicios() {
     }
 
     setSaving(true)
+    const rawName = nombre.trim()
+    const capitalized = capitalize(rawName)
+    const serviceKey = inferServiceKeyFromName(rawName)
+
+    const updatePayload = {
+      nombre: capitalized,
+      ...(serviceKey ? { service_key: serviceKey } : {}),
+    }
+
     const { error } = await supabase
       .from('servicios')
-      .update({ nombre: capitalize(nombre.trim()) })
+      .update(updatePayload)
       .eq('id', editingId)
 
     setSaving(false)
@@ -116,23 +136,40 @@ export function Servicios() {
 
   function confirmDelete(id) {
     setDeleteId(id)
+    setDeleteMode('normal')
     setOpenDeleteModal(true)
   }
 
   async function handleDelete() {
     if (!deleteId) return
 
+    // Verificar si el servicio tiene cuentas asociadas
+    const { count, error: cuentasError } = await supabase
+      .from('cuentas_servicios')
+      .select('id', { count: 'exact', head: true })
+      .eq('servicio_id', deleteId)
+
+    if (!cuentasError && (count || 0) > 0) {
+      const msg = 'No se puede eliminar este servicio porque tiene cuentas registradas. Primero elimina o reasigna todas las cuentas de este servicio.'
+      setFormError(msg)
+      setDeleteMode('blocked')
+      return
+    }
+
     const { error } = await supabase.from('servicios').delete().eq('id', deleteId)
 
     if (error) {
       setFormError('Error al eliminar: ' + error.message)
       setOpenDeleteModal(false)
+      setDeleteMode('normal')
+      setDeleteId(null)
       return
     }
 
     setServicios((prev) => prev.filter((s) => s.id !== deleteId))
     setOpenDeleteModal(false)
     setDeleteId(null)
+    setDeleteMode('normal')
   }
 
   function handleGestionarCuentas(servicio) {
@@ -153,7 +190,8 @@ export function Servicios() {
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-        <table className="min-w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="min-w-[700px] w-full text-sm">
           <thead className="bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700">
             <tr>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">#</th>
@@ -227,6 +265,7 @@ export function Servicios() {
               ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <Modal open={openNewServicio} title="Nuevo Servicio" onClose={() => setOpenNewServicio(false)}>
@@ -291,12 +330,32 @@ export function Servicios() {
 
       <ConfirmModal
         open={openDeleteModal}
-        onClose={() => { setOpenDeleteModal(false); setDeleteId(null); }}
-        onConfirm={handleDelete}
-        title="¿Eliminar Servicio?"
-        message="Esta acción no se puede deshacer. El servicio y todas sus cuentas serán eliminados permanentemente."
-        confirmText="Eliminar"
-        type="danger"
+        onClose={() => {
+          setOpenDeleteModal(false)
+          setDeleteId(null)
+          setDeleteMode('normal')
+        }}
+        onConfirm={
+          deleteMode === 'normal'
+            ? handleDelete
+            : () => {
+                setOpenDeleteModal(false)
+                setDeleteMode('normal')
+                setDeleteId(null)
+              }
+        }
+        title={
+          deleteMode === 'normal'
+            ? '¿Eliminar Servicio?'
+            : 'No se puede eliminar este servicio'
+        }
+        message={
+          deleteMode === 'normal'
+            ? 'Esta acción no se puede deshacer. El servicio será eliminado permanentemente.'
+            : 'Este servicio tiene cuentas registradas y no se puede eliminar. Primero elimina o reasigna todas las cuentas asociadas.'
+        }
+        confirmText={deleteMode === 'normal' ? 'Eliminar' : 'Entendido'}
+        type={deleteMode === 'normal' ? 'danger' : 'info'}
       />
     </div>
   )

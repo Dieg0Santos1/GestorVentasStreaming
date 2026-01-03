@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Plus, Edit2, Trash2, RefreshCw, MessageCircle } from 'lucide-react'
+import { FilterableSelect } from '../components/common/FilterableSelect'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { supabase } from '../lib/supabaseClient'
@@ -7,6 +8,7 @@ import { useAuth } from '../context/AuthContext'
 import { useCurrency } from '../hooks/useCurrency'
 import { formatMoney } from '../lib/money'
 import { openWhatsApp, validateWhatsAppPhone } from '../lib/whatsapp'
+import { inferServiceKeyFromName } from '../lib/textUtils'
 
 function normalizeDateString(value) {
   if (!value) return ''
@@ -688,6 +690,8 @@ export function Ventas() {
       const cliente = venta?.clientes
       const cuenta = venta?.cuentas_servicios
       const servicioNombre = cuenta?.servicios?.nombre || 'Servicio'
+      const serviceKey = inferServiceKeyFromName(servicioNombre)
+      const ocultarCredenciales = serviceKey === 'spotify' || serviceKey === 'youtube'
       const telefono = cliente?.telefono
 
       const phoneValidation = validateWhatsAppPhone(telefono)
@@ -730,8 +734,8 @@ export function Ventas() {
       const datosAcceso = [
         `Servicio: ${servicioNombre}`,
         `Tipo: ${tipo}`,
-        `Cuenta: ${cuenta?.correo || '—'}`,
-        `Contraseña: ${cuenta?.contrasena || '—'}`,
+        !ocultarCredenciales ? `Cuenta: ${cuenta?.correo || '—'}` : null,
+        !ocultarCredenciales ? `Contraseña: ${cuenta?.contrasena || '—'}` : null,
         perfilLine,
         pinLine,
         `Vence: ${formatDateDisplay(fechaVence)}`,
@@ -943,7 +947,8 @@ export function Ventas() {
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-        <table className="min-w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="min-w-[1100px] w-full text-sm">
           <thead className="bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700">
             <tr>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">#</th>
@@ -1113,9 +1118,10 @@ export function Ventas() {
                   </tr>
                 )
               })}
-            </tbody>
-          </table>
-
+          </tbody>
+        </table>
+        </div>
+      </div>
           {!loading && !error && totalItems > 0 && (
             <div className="flex flex-col md:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-slate-200 bg-gradient-to-r from-slate-50 via-blue-50/40 to-slate-50">
               <p className="text-xs text-slate-600">
@@ -1149,23 +1155,24 @@ export function Ventas() {
               </div>
             </div>
           )}
-        </div>
 
       <Modal open={openNewVenta} title="Nueva Venta" onClose={() => { setOpenNewVenta(false); resetForm(); }}>
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div className="grid gap-4 md:grid-cols-2">
-            <select
+            <FilterableSelect
               value={clienteId}
-              onChange={(e) => setClienteId(e.target.value)}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="">Selecciona cliente</option>
-              {clientes.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.nombre} {c.apellido} {c.telefono ? `(${c.telefono})` : ''}
-                </option>
-              ))}
-            </select>
+              onChange={(value) => setClienteId(value)}
+              options={clientes}
+              placeholder="Escribe o selecciona un cliente..."
+              getOptionValue={(c) => c.id}
+              getOptionLabel={(c) => `${c.nombre} ${c.apellido}`}
+              renderOption={(c) => (
+                <div className="flex justify-between items-center">
+                  <span>{c.nombre} {c.apellido}</span>
+                  {c.telefono && <span className="text-xs text-slate-500 ml-2">({c.telefono})</span>}
+                </div>
+              )}
+            />
 
             <select
               value={servicioId}
@@ -1189,21 +1196,17 @@ export function Ventas() {
               ))}
             </select>
 
-            <select
+            <FilterableSelect
               value={cuentaId}
-              onChange={async (e) => {
-                const value = e.target.value
+              onChange={async (value) => {
+                const cuenta = cuentasServicioSeleccionado.find((c) => c.id === value)
                 setCuentaId(value)
                 setPerfilesDisponibles([])
                 setPerfilId('')
-                const cuenta = cuentasServicioSeleccionado.find((c) => c.id === value)
                 if (cuenta) {
                   setPrecioVenta(cuenta.precio.toString())
-                  // La fecha de vencimiento de la VENTA es independiente de la fecha de vencimiento de la CUENTA.
-                  // Se calcula por defecto desde la fecha de inicio, pero es editable.
                   const tienePerfilVendido = cuentasConPerfilVendidoIds.has(cuenta.id)
                   if (tienePerfilVendido) {
-                    // Si ya hay perfiles vendidos, forzamos modo perfil y cargamos perfiles libres
                     setModoVenta('perfil')
                     await fetchPerfilesLibresByCuenta(value)
                   } else if (modoVenta === 'perfil') {
@@ -1211,16 +1214,21 @@ export function Ventas() {
                   }
                 }
               }}
+              options={cuentasServicioSeleccionado}
+              placeholder="Escribe o selecciona una cuenta..."
               disabled={!servicioId}
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 md:col-span-2 disabled:bg-slate-50 disabled:text-slate-400"
-            >
-              <option value="">Selecciona cuenta</option>
-              {cuentasServicioSeleccionado.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.correo} - vence {new Date(c.fecha_vencimiento).toLocaleDateString('es-ES')}
-                </option>
-              ))}
-            </select>
+              className="md:col-span-2"
+              getOptionValue={(c) => c.id}
+              getOptionLabel={(c) => c.correo}
+              renderOption={(c) => (
+                <div className="flex justify-between items-center">
+                  <span className="font-mono text-xs">{c.correo}</span>
+                  <span className="text-xs text-slate-500 ml-2">
+                    vence {new Date(c.fecha_vencimiento).toLocaleDateString('es-ES')}
+                  </span>
+                </div>
+              )}
+            />
 
             <div className="md:col-span-2 grid gap-3 md:grid-cols-2">
               <div className="flex flex-col gap-1">

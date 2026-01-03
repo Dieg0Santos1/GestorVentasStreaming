@@ -14,6 +14,7 @@ export function Proveedores() {
   const [openEditProveedor, setOpenEditProveedor] = useState(false)
   const [openDeleteModal, setOpenDeleteModal] = useState(false)
   const [deleteId, setDeleteId] = useState(null)
+  const [deleteMode, setDeleteMode] = useState('normal') // 'normal' | 'blocked'
   const [proveedores, setProveedores] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -136,6 +137,7 @@ export function Proveedores() {
 
   function confirmDelete(id) {
     setDeleteId(id)
+    setDeleteMode('normal')
     setOpenDeleteModal(true)
   }
 
@@ -146,17 +148,33 @@ export function Proveedores() {
   async function handleDelete() {
     if (!deleteId) return
 
+    // Verificar si el proveedor tiene cuentas asociadas
+    const { count, error: cuentasError } = await supabase
+      .from('cuentas_servicios')
+      .select('id', { count: 'exact', head: true })
+      .eq('proveedor_id', deleteId)
+
+    if (!cuentasError && (count || 0) > 0) {
+      const msg = 'No se puede eliminar este proveedor porque tiene cuentas registradas. Primero elimina o reasigna todas las cuentas de este proveedor.'
+      setFormError(msg)
+      setDeleteMode('blocked')
+      return
+    }
+
     const { error } = await supabase.from('proveedores').delete().eq('id', deleteId)
 
     if (error) {
       setFormError('Error al eliminar: ' + error.message)
       setOpenDeleteModal(false)
+      setDeleteMode('normal')
+      setDeleteId(null)
       return
     }
 
     setProveedores((prev) => prev.filter((p) => p.id !== deleteId))
     setOpenDeleteModal(false)
     setDeleteId(null)
+    setDeleteMode('normal')
   }
 
   return (
@@ -173,7 +191,8 @@ export function Proveedores() {
       </div>
 
       <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-md">
-        <table className="min-w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="min-w-[900px] w-full text-sm">
           <thead className="bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700">
             <tr>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">#</th>
@@ -260,6 +279,7 @@ export function Proveedores() {
               ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <Modal open={openNewProveedor} title="Nuevo Proveedor" onClose={() => setOpenNewProveedor(false)}>
@@ -358,12 +378,32 @@ export function Proveedores() {
 
       <ConfirmModal
         open={openDeleteModal}
-        onClose={() => { setOpenDeleteModal(false); setDeleteId(null); }}
-        onConfirm={handleDelete}
-        title="¿Eliminar Proveedor?"
-        message="Esta acción no se puede deshacer. El proveedor será eliminado permanentemente."
-        confirmText="Eliminar"
-        type="danger"
+        onClose={() => {
+          setOpenDeleteModal(false)
+          setDeleteId(null)
+          setDeleteMode('normal')
+        }}
+        onConfirm={
+          deleteMode === 'normal'
+            ? handleDelete
+            : () => {
+                setOpenDeleteModal(false)
+                setDeleteMode('normal')
+                setDeleteId(null)
+              }
+        }
+        title={
+          deleteMode === 'normal'
+            ? '¿Eliminar Proveedor?'
+            : 'No se puede eliminar este proveedor'
+        }
+        message={
+          deleteMode === 'normal'
+            ? 'Esta acción no se puede deshacer. El proveedor será eliminado permanentemente.'
+            : 'Este proveedor tiene cuentas registradas y no se puede eliminar. Primero elimina o reasigna todas las cuentas asociadas.'
+        }
+        confirmText={deleteMode === 'normal' ? 'Eliminar' : 'Entendido'}
+        type={deleteMode === 'normal' ? 'danger' : 'info'}
       />
     </div>
   )

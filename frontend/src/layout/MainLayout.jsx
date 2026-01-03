@@ -19,6 +19,7 @@ export function MainLayout() {
   const initialPage = location.state?.initialPage || 'dashboard'
   const { current, setCurrent } = useCurrentPage(initialPage)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarOpenMobile, setSidebarOpenMobile] = useState(false)
   const [reportesCount, setReportesCount] = useState(0)
 
   useEffect(() => {
@@ -82,28 +83,51 @@ export function MainLayout() {
   }, [user?.id, current])
 
   return (
-    <div className="h-screen overflow-hidden flex bg-slate-50 text-slate-900">
-      <Sidebar
-        current={current}
-        onChange={setCurrent}
-        collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed((prev) => !prev)}
-        reportesCount={reportesCount}
-      />
-
-      <div className="flex-1 flex flex-col min-w-0">
-        <TopBar current={current} />
-
-        <main className="flex-1 p-4 md:p-8 bg-gradient-to-br from-slate-50 via-slate-50 to-slate-100 overflow-y-auto overflow-x-hidden">
-          {current === 'dashboard' && <Dashboard />}
-          {current === 'proveedores' && <Proveedores />}
-          {current === 'clientes' && <Clientes />}
-          {current === 'servicios' && <Servicios />}
-          {current === 'ventas' && <Ventas />}
-          {current === 'reportes' && <Reportes />}
-          {current === 'configuracion' && <Configuracion />}
-        </main>
+    <>
+      {/* Sidebar móvil como overlay */}
+      <div className={`${sidebarOpenMobile ? 'fixed' : 'hidden'} inset-0 z-40 md:hidden`}>
+        <div
+          className="absolute inset-0 bg-slate-900/60"
+          onClick={() => setSidebarOpenMobile(false)}
+        />
+        <div className="relative h-full w-72 max-w-full">
+          <Sidebar
+            current={current}
+            onChange={(id) => {
+              setCurrent(id)
+              setSidebarOpenMobile(false)
+            }}
+            collapsed={false}
+            reportesCount={reportesCount}
+            mobile={true}
+          />
+        </div>
       </div>
-    </div>
+
+      {/* Layout desktop */}
+      <div className="h-screen overflow-hidden flex bg-slate-50 text-slate-900">
+        <Sidebar
+          current={current}
+          onChange={setCurrent}
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed((prev) => !prev)}
+          reportesCount={reportesCount}
+        />
+
+        <div className="flex-1 flex flex-col min-w-0">
+          <TopBar current={current} onToggleSidebarMobile={() => setSidebarOpenMobile(true)} />
+
+          <main className="flex-1 p-4 md:p-8 bg-gradient-to-br from-slate-50 via-slate-50 to-slate-100 overflow-y-auto overflow-x-hidden">
+            {current === 'dashboard' && <Dashboard />}
+            {current === 'proveedores' && <Proveedores />}
+            {current === 'clientes' && <Clientes />}
+            {current === 'servicios' && <Servicios />}
+            {current === 'ventas' && <Ventas />}
+            {current === 'reportes' && <Reportes />}
+            {current === 'configuracion' && <Configuracion />}
+          </main>
+        </div>
+      </div>
+    </>
   )
 }

@@ -8,12 +8,14 @@ const navigation = [
   { id: 'configuracion', label: 'Configuración', icon: '⚙️' },
 ]
 
-export function Sidebar({ current, onChange, collapsed = false, onToggle, reportesCount = 0 }) {
+export function Sidebar({ current, onChange, collapsed = false, onToggle, reportesCount = 0, mobile = false }) {
+  const baseClasses = 'border-r border-blue-900/30 bg-gradient-to-b from-blue-900 via-blue-800 to-emerald-800 flex flex-col text-slate-50 h-screen sticky top-0 transition-all duration-200'
+  const visibility = mobile ? '' : 'hidden md:flex'
+  const width = collapsed && !mobile ? 'w-20' : 'w-64'
+
   return (
     <aside
-      className={`border-r border-blue-900/30 bg-gradient-to-b from-blue-900 via-blue-800 to-emerald-800 hidden md:flex flex-col text-slate-50 h-screen sticky top-0 transition-all duration-200 ${
-        collapsed ? 'w-20' : 'w-64'
-      }`}
+      className={`${baseClasses} ${visibility} ${width}`}
     >
       <div
         className={`px-4 border-b border-blue-900/40 ${

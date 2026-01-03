@@ -30,7 +30,7 @@ export function StatCards() {
       setLoading(true)
       setError(null)
 
-      const [ventasRes, clientesRes, cuentasRes, proveedoresRes, pagosRes] = await Promise.all([
+      const [ventasRes, clientesRes, cuentasRes, proveedoresRes, pagosRes, gastosRes] = await Promise.all([
         // Fallback de ingresos (si no hay pagos_ventas)
         supabase
           .from('ventas')
@@ -53,6 +53,11 @@ export function StatCards() {
           .from('pagos_ventas')
           .select('monto, fecha_pago')
           .eq('user_id', user.id),
+        // gastos_cuentas: gastos reales (compra inicial + renovaciones de cuentas con proveedor).
+        supabase
+          .from('gastos_cuentas')
+          .select('monto, fecha_gasto')
+          .eq('user_id', user.id),
       ])
 
       // Ganancia del mes actual = ingresos del mes - gastos del mes
@@ -74,9 +79,17 @@ export function StatCards() {
         .filter((x) => inMonth(x.fecha))
         .reduce((acc, x) => acc + (Number(x.monto) || 0), 0)
 
-      const gastosMes = (cuentasRes.data || [])
-        .filter((c) => inMonth(c.fecha_inicio))
-        .reduce((acc, c) => acc + (Number(c.precio_compra) || 0), 0)
+      let gastosMes = 0
+
+      if (gastosRes && !gastosRes.error && (gastosRes.data || []).length > 0) {
+        gastosMes = (gastosRes.data || [])
+          .filter((g) => inMonth(g.fecha_gasto))
+          .reduce((acc, g) => acc + (Number(g.monto) || 0), 0)
+      } else {
+        gastosMes = (cuentasRes.data || [])
+          .filter((c) => inMonth(c.fecha_inicio))
+          .reduce((acc, c) => acc + (Number(c.precio_compra) || 0), 0)
+      }
 
       setGananciaMes(ingresosMes - gastosMes)
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
-import { Plus, Edit2, Trash2, ArrowLeft, Calendar, Search } from 'lucide-react'
+import { Plus, Edit2, Trash2, ArrowLeft, Calendar, Search, RefreshCw } from 'lucide-react'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { supabase } from '../lib/supabaseClient'
@@ -13,6 +13,18 @@ function todayISO() {
   const d = new Date()
   d.setHours(0, 0, 0, 0)
   return d.toISOString().slice(0, 10)
+}
+
+function addMonths(dateStr, months) {
+  const norm = normalizeDateString(dateStr)
+  if (!norm) return ''
+  const [y, m, d] = norm.split('-')
+  const base = new Date(Number(y), Number(m) - 1, Number(d))
+  base.setMonth(base.getMonth() + Number(months || 0))
+  const ny = base.getFullYear()
+  const nm = String(base.getMonth() + 1).padStart(2, '0')
+  const nd = String(base.getDate()).padStart(2, '0')
+  return `${ny}-${nm}-${nd}`
 }
 
 export function CuentasServicio() {
@@ -44,9 +56,19 @@ export function CuentasServicio() {
   const [proveedorId, setProveedorId] = useState('')
   const [fechaInicio, setFechaInicio] = useState('')
   const [fechaVencimiento, setFechaVencimiento] = useState('')
+  const [vencimientoIndefinido, setVencimientoIndefinido] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState(null)
+
+  // Renovación con proveedor
+  const [openRenovacionModal, setOpenRenovacionModal] = useState(false)
+  const [cuentaRenovando, setCuentaRenovando] = useState(null)
+  const [mesesRenovacion, setMesesRenovacion] = useState(1)
+  const [fechaManualRenovacion, setFechaManualRenovacion] = useState('')
+  const [montoRenovacion, setMontoRenovacion] = useState('')
+  const [savingRenovacion, setSavingRenovacion] = useState(false)
+  const [renovacionError, setRenovacionError] = useState(null)
 
   // Estado para gestión de perfiles por cuenta
   const [openPerfilesModal, setOpenPerfilesModal] = useState(false)
@@ -189,12 +211,92 @@ export function CuentasServicio() {
     }
   }
 
+  function openRenovacionModalCuenta(cuenta) {
+    if (!cuenta) return
+
+    setCuentaRenovando(cuenta)
+
+    const baseMonto =
+      Number(
+        cuenta.precio_compra != null
+          ? cuenta.precio_compra
+          : cuenta.precio_venta != null
+          ? cuenta.precio_venta
+          : cuenta.precio || 0
+      ) || 0
+
+    setMesesRenovacion(1)
+    setMontoRenovacion(baseMonto ? baseMonto.toFixed(2) : '')
+    setFechaManualRenovacion('')
+    setRenovacionError(null)
+    setOpenRenovacionModal(true)
+  }
+
+  async function handleRenovacionCuentaSubmit(e) {
+    e.preventDefault()
+    setRenovacionError(null)
+    if (!cuentaRenovando) return
+
+    const meses = Number(mesesRenovacion) || 1
+    const monto = parseFloat(montoRenovacion)
+    if (!monto || monto <= 0) {
+      setRenovacionError('El monto de la renovación debe ser mayor a 0')
+      return
+    }
+
+    const baseFecha =
+      normalizeDateString(cuentaRenovando.fecha_vencimiento) || todayISO()
+
+    const fechaVencimientoRenov =
+      fechaManualRenovacion || addMonths(baseFecha, meses)
+
+    setSavingRenovacion(true)
+
+    const { error } = await supabase
+      .from('cuentas_servicios')
+      .update({
+        fecha_vencimiento: fechaVencimientoRenov,
+      })
+      .eq('id', cuentaRenovando.id)
+
+    setSavingRenovacion(false)
+
+    if (error) {
+      setRenovacionError(error.message)
+      return
+    }
+
+    try {
+      await supabase.from('gastos_cuentas').insert({
+        user_id: user.id,
+        cuenta_servicio_id: cuentaRenovando.id,
+        monto,
+        fecha_gasto: new Date().toISOString(),
+        tipo: 'renovacion',
+      })
+    } catch (e) {
+      console.warn('No se pudo registrar gasto de renovación (gastos_cuentas).', e)
+    }
+
+    await fetchCuentas()
+    setOpenRenovacionModal(false)
+    setCuentaRenovando(null)
+  }
+
   async function handleSubmit(e) {
     e.preventDefault()
     setFormError(null)
 
-    if (!correo.trim() || !contrasena.trim() || !precioCompra || !precioVenta || !proveedorId || !fechaInicio || !fechaVencimiento) {
-      setFormError('Todos los campos son obligatorios')
+    if (
+      !correo.trim() ||
+      !contrasena.trim() ||
+      !precioCompra ||
+      !precioVenta ||
+      !proveedorId ||
+      !fechaInicio ||
+      (!fechaVencimiento && !vencimientoIndefinido)
+    ) {
+      setFormError('Todos los campos son obligatorios (o marca vencimiento indefinido)')
       return
     }
 
@@ -213,7 +315,7 @@ export function CuentasServicio() {
         precio_venta: precioVentaNum,
         proveedor_id: proveedorId,
         fecha_inicio: fechaInicio,
-        fecha_vencimiento: fechaVencimiento
+        fecha_vencimiento: vencimientoIndefinido ? null : fechaVencimiento,
       })
       .select(`
         id, 
@@ -244,8 +346,15 @@ export function CuentasServicio() {
     e.preventDefault()
     setFormError(null)
 
-    if (!correo.trim() || !contrasena.trim() || !precioCompra || !precioVenta || !proveedorId || !fechaVencimiento) {
-      setFormError('Todos los campos son obligatorios')
+    if (
+      !correo.trim() ||
+      !contrasena.trim() ||
+      !precioCompra ||
+      !precioVenta ||
+      !proveedorId ||
+      (!fechaVencimiento && !vencimientoIndefinido)
+    ) {
+      setFormError('Todos los campos son obligatorios (o marca vencimiento indefinido)')
       return
     }
 
@@ -261,7 +370,7 @@ export function CuentasServicio() {
         precio_compra: precioCompraNum,
         precio_venta: precioVentaNum,
         proveedor_id: proveedorId,
-        fecha_vencimiento: fechaVencimiento
+        fecha_vencimiento: vencimientoIndefinido ? null : fechaVencimiento,
       })
       .eq('id', editingId)
 
@@ -288,7 +397,8 @@ export function CuentasServicio() {
     setPrecioCompra(compra != null ? compra.toString() : '')
     setPrecioVenta(venta != null ? venta.toString() : '')
     setProveedorId(cuenta.proveedor_id)
-    setFechaVencimiento(cuenta.fecha_vencimiento)
+    setFechaVencimiento(cuenta.fecha_vencimiento || '')
+    setVencimientoIndefinido(!cuenta.fecha_vencimiento)
     setOpenEditCuenta(true)
   }
 
@@ -307,16 +417,57 @@ export function CuentasServicio() {
   async function handleDelete() {
     if (!deleteId) return
 
+    // Solo verificar si hay ventas ACTIVAS (no liberadas)
+    const { data: ventasActivas, error: ventasError } = await supabase
+      .from('ventas')
+      .select('id, liberada')
+      .eq('cuenta_servicio_id', deleteId)
+      .eq('liberada', false)
+
+    if (!ventasError && ventasActivas && ventasActivas.length > 0) {
+      setFormError('No se puede eliminar esta cuenta porque actualmente está vendida. Debes liberar la venta primero.')
+      setDeleteMode('blocked')
+      return
+    }
+
+    // Verificar si hay perfiles con ventas activas
+    const { data: perfilesData, error: perfilesError } = await supabase
+      .from('perfiles_cuentas')
+      .select('id')
+      .eq('cuenta_servicio_id', deleteId)
+
+    if (!perfilesError && perfilesData && perfilesData.length > 0) {
+      const perfilIds = perfilesData.map(p => p.id)
+      const { data: perfilVentasActivas, error: perfilVentasError } = await supabase
+        .from('ventas')
+        .select('id')
+        .in('perfil_id', perfilIds)
+        .eq('liberada', false)
+
+      if (!perfilVentasError && perfilVentasActivas && perfilVentasActivas.length > 0) {
+        setFormError('No se puede eliminar esta cuenta porque tiene perfiles actualmente vendidos. Debes liberar las ventas primero.')
+        setDeleteMode('blocked')
+        return
+      }
+    }
+
     const { error } = await supabase.from('cuentas_servicios').delete().eq('id', deleteId)
 
     if (error) {
-      setFormError('Error al eliminar: ' + error.message)
+      // Error 23503 = foreign key violation
+      if (error.code === '23503') {
+        setFormError('No se puede eliminar esta cuenta porque tiene registros asociados. Intenta liberar todas las ventas activas primero.')
+        setDeleteMode('blocked')
+      } else {
+        setFormError('Error al eliminar: ' + error.message)
+      }
       return
     }
 
     setCuentas((prev) => prev.filter((c) => c.id !== deleteId))
     setOpenDeleteModal(false)
     setDeleteId(null)
+    setDeleteMode('normal')
   }
 
   function resetForm() {
@@ -327,6 +478,7 @@ export function CuentasServicio() {
     setProveedorId('')
     setFechaInicio('')
     setFechaVencimiento('')
+    setVencimientoIndefinido(false)
     setFormError(null)
   }
 
@@ -502,26 +654,26 @@ export function CuentasServicio() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 p-6">
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Header */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-3 md:px-6 py-4 md:py-6">
+          <div className="flex flex-col gap-3 md:gap-0 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-start gap-2 md:gap-4 min-w-0 flex-1">
               <button
                 onClick={() => {
                   navigate('/', { state: { initialPage: 'servicios' } })
                 }}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-sm"
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-2 md:px-3 py-2 text-xs md:text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors shadow-sm flex-shrink-0"
               >
-                <ArrowLeft size={18} />
-                Regresar
+                <ArrowLeft size={16} className="md:w-[18px] md:h-[18px]" />
+                <span className="hidden sm:inline">Regresar</span>
               </button>
-              <div>
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-lg">
-                    <span className="text-white font-bold text-lg">📺</span>
+                  <div className="w-8 h-8 md:w-10 md:h-10 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-lg flex-shrink-0">
+                    <span className="text-white font-bold text-base md:text-lg">📺</span>
                   </div>
-                  <div>
-                    <h1 className="text-2xl font-bold text-slate-900">{servicio?.nombre || 'Servicio'}</h1>
-                    <p className="text-sm text-slate-500">Gestión de cuentas</p>
+                  <div className="min-w-0 flex-1">
+                    <h1 className="text-base md:text-xl lg:text-2xl font-bold text-slate-900 truncate">{servicio?.nombre || 'Servicio'}</h1>
+                    <p className="text-xs md:text-sm text-slate-500 hidden sm:block">Gestión de cuentas</p>
                   </div>
                 </div>
               </div>
@@ -532,39 +684,39 @@ export function CuentasServicio() {
                 setFechaInicio(todayISO())
                 setOpenNewCuenta(true)
               }}
-              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-blue-600 to-blue-700 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-blue-700 hover:to-blue-800 transition-all"
+              className="inline-flex items-center justify-center gap-1.5 md:gap-2 rounded-lg bg-gradient-to-r from-blue-600 to-blue-700 px-3 md:px-5 py-2 md:py-2.5 text-xs md:text-sm font-semibold text-white shadow-lg hover:from-blue-700 hover:to-blue-800 transition-all flex-shrink-0"
             >
-              <Plus size={18} />
+              <Plus size={16} className="md:w-[18px] md:h-[18px]" />
               Nuevo
             </button>
           </div>
         </div>
 
         {/* Filtros y controles */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-slate-600 font-medium">Mostrar</span>
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 px-3 md:px-4 py-3">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-2 md:gap-3">
+              <span className="text-xs md:text-sm text-slate-600 font-medium">Mostrar</span>
               <select
                 value={itemsPerPage}
                 onChange={(e) => {
                   setItemsPerPage(Number(e.target.value))
                   setCurrentPage(1)
                 }}
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                className="rounded-lg border border-slate-300 bg-white px-2 md:px-3 py-1.5 text-xs md:text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
               >
                 <option value={10}>10</option>
                 <option value={25}>25</option>
                 <option value={50}>50</option>
                 <option value={100}>100</option>
               </select>
-              <span className="text-sm text-slate-600">registros</span>
+              <span className="text-xs md:text-sm text-slate-600">registros</span>
             </div>
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="flex flex-wrap items-center gap-2 md:gap-4">
               <div className="flex items-center gap-2">
-                <span className="text-sm text-slate-600 font-medium">Buscar:</span>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <span className="text-xs md:text-sm text-slate-600 font-medium hidden sm:inline">Buscar:</span>
+                <div className="relative flex-1 sm:flex-initial">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                   <input
                     type="text"
                     placeholder="Correo, proveedor..."
@@ -573,19 +725,19 @@ export function CuentasServicio() {
                       setSearchTerm(e.target.value)
                       setCurrentPage(1)
                     }}
-                    className="pl-9 pr-3 py-1.5 rounded-lg border border-slate-300 bg-white text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 w-64"
+                    className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs md:text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 w-full sm:w-48 md:w-64"
                   />
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <span className="text-sm text-slate-600 font-medium">Estado:</span>
+                <span className="text-xs md:text-sm text-slate-600 font-medium">Estado:</span>
                 <select
                   value={estadoFilter}
                   onChange={(e) => {
                     setEstadoFilter(e.target.value)
                     setCurrentPage(1)
                   }}
-                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  className="rounded-lg border border-slate-300 bg-white px-2 md:px-3 py-1.5 text-xs md:text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
                 >
                   <option value="all">Todas</option>
                   <option value="activa">Activas</option>
@@ -599,7 +751,8 @@ export function CuentasServicio() {
 
         {/* Tabla */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <table className="min-w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="min-w-[1000px] w-full text-sm">
             <thead className="bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700">
               <tr>
                 <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">#</th>
@@ -715,6 +868,13 @@ export function CuentasServicio() {
                     <td className="px-4 py-4 whitespace-nowrap">
                       <div className="flex items-center justify-center gap-2">
                         <button
+                          onClick={() => openRenovacionModalCuenta(cuenta)}
+                          className="p-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm"
+                          title="Registrar renovación con proveedor"
+                        >
+                          <RefreshCw size={16} />
+                        </button>
+                        <button
                           onClick={() => openEditModal(cuenta)}
                           className="p-2 rounded-lg bg-cyan-500 text-white hover:bg-cyan-600 transition-colors shadow-sm"
                           title="Editar"
@@ -735,6 +895,7 @@ export function CuentasServicio() {
               })}
           </tbody>
           </table>
+          </div>
 
           {!loading && !error && totalItems > 0 && (
             <div className="flex flex-col md:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-slate-200 bg-gradient-to-r from-slate-50 via-blue-50/40 to-slate-50">
@@ -771,6 +932,119 @@ export function CuentasServicio() {
           )}
         </div>
       </div>
+
+      {/* Modal Renovación proveedor */}
+      <Modal
+        open={openRenovacionModal}
+        title="Renovación de cuenta con proveedor"
+        onClose={() => {
+          setOpenRenovacionModal(false)
+          setCuentaRenovando(null)
+          setRenovacionError(null)
+        }}
+      >
+        <form className="space-y-4" onSubmit={handleRenovacionCuentaSubmit}>
+          {cuentaRenovando && (
+            <div className="text-xs text-slate-600 space-y-1">
+              <p>
+                <span className="font-semibold">Servicio:</span>{' '}
+                {servicio?.nombre || '—'}
+              </p>
+              <p>
+                <span className="font-semibold">Cuenta:</span>{' '}
+                {cuentaRenovando.correo || '—'}
+              </p>
+              <p>
+                <span className="font-semibold">Vence actual:</span>{' '}
+                {formatDateDisplay(cuentaRenovando.fecha_vencimiento)}
+              </p>
+            </div>
+          )}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-600">Meses a renovar</span>
+              <select
+                value={mesesRenovacion}
+                onChange={(e) => {
+                  const value = Number(e.target.value) || 1
+                  setMesesRenovacion(value)
+                  if (cuentaRenovando) {
+                    const baseMonto =
+                      Number(
+                        cuentaRenovando.precio_compra != null
+                          ? cuentaRenovando.precio_compra
+                          : cuentaRenovando.precio_venta != null
+                          ? cuentaRenovando.precio_venta
+                          : cuentaRenovando.precio || 0
+                      ) || 0
+                    if (baseMonto > 0) {
+                      setMontoRenovacion((baseMonto * value).toFixed(2))
+                    }
+                  }
+                }}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value={1}>1 mes</option>
+                <option value={2}>2 meses</option>
+                <option value={3}>3 meses</option>
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-600">
+                Fecha de vencimiento (opcional, manual)
+              </span>
+              <input
+                type="date"
+                value={fechaManualRenovacion}
+                onChange={(e) => setFechaManualRenovacion(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-slate-400">
+                Si no eliges una fecha, se calculará sumando los meses al vencimiento actual.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-600">Monto de renovación</span>
+              <input
+                type="number"
+                step="0.01"
+                value={montoRenovacion}
+                onChange={(e) => setMontoRenovacion(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-slate-400">
+                Por defecto es el precio de compra actual multiplicado por los meses seleccionados.
+              </p>
+            </div>
+          </div>
+
+          {renovacionError && <p className="text-sm text-rose-500">{renovacionError}</p>}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                setOpenRenovacionModal(false)
+                setCuentaRenovando(null)
+                setRenovacionError(null)
+              }}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={savingRenovacion}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {savingRenovacion ? 'Guardando...' : 'Registrar renovación'}
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       {/* Modal Nuevo */}
       <Modal open={openNewCuenta} title="Nueva Cuenta" onClose={() => { setOpenNewCuenta(false); resetForm(); }}>
@@ -833,8 +1107,8 @@ export function CuentasServicio() {
                 Por defecto es hoy, pero puedes cambiarla.
               </p>
             </div>
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+            <div className="md:col-span-2 space-y-2">
+              <label className="block text-sm font-medium text-slate-700">
                 <Calendar className="inline mr-1.5" size={14} />
                 Fecha de Vencimiento
               </label>
@@ -842,8 +1116,22 @@ export function CuentasServicio() {
                 type="date"
                 value={fechaVencimiento}
                 onChange={(e) => setFechaVencimiento(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                disabled={vencimientoIndefinido}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-slate-50 disabled:text-slate-400"
               />
+              <label className="flex items-center gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={vencimientoIndefinido}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setVencimientoIndefinido(checked)
+                    if (checked) setFechaVencimiento('')
+                  }}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span>Sin fecha de vencimiento (indefinida)</span>
+              </label>
             </div>
           </div>
 
@@ -1375,8 +1663,8 @@ export function CuentasServicio() {
                 </option>
               ))}
             </select>
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">
+            <div className="md:col-span-2 space-y-2">
+              <label className="block text-sm font-medium text-slate-700">
                 <Calendar className="inline mr-1.5" size={14} />
                 Fecha de Vencimiento
               </label>
@@ -1384,8 +1672,22 @@ export function CuentasServicio() {
                 type="date"
                 value={fechaVencimiento}
                 onChange={(e) => setFechaVencimiento(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                disabled={vencimientoIndefinido}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-slate-50 disabled:text-slate-400"
               />
+              <label className="flex items-center gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={vencimientoIndefinido}
+                  onChange={(e) => {
+                    const checked = e.target.checked
+                    setVencimientoIndefinido(checked)
+                    if (checked) setFechaVencimiento('')
+                  }}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span>Sin fecha de vencimiento (indefinida)</span>
+              </label>
             </div>
           </div>
 
@@ -1417,10 +1719,12 @@ export function CuentasServicio() {
           setOpenDeleteModal(false)
           setDeleteId(null)
           setDeleteMode('normal')
+          setFormError(null)
         }}
         onConfirm={deleteMode === 'normal' ? handleDelete : () => {
           setOpenDeleteModal(false)
           setDeleteMode('normal')
+          setFormError(null)
         }}
         title={
           deleteMode === 'normal'
@@ -1430,7 +1734,7 @@ export function CuentasServicio() {
         message={
           deleteMode === 'normal'
             ? 'Esta acción no se puede deshacer. La cuenta será eliminada permanentemente.'
-            : 'Esta cuenta ya ha sido vendida y no se puede eliminar.'
+            : (formError || 'Esta cuenta ya ha sido vendida y no se puede eliminar.')
         }
         confirmText={deleteMode === 'normal' ? 'Eliminar' : 'Entendido'}
         type={deleteMode === 'normal' ? 'danger' : 'info'}

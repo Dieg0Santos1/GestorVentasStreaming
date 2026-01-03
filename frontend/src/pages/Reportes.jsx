@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Edit2, Search } from 'lucide-react'
+import { AlertTriangle, Edit2, Search, RefreshCw } from 'lucide-react'
 import { supabase } from '../lib/supabaseClient'
 import { useAuth } from '../context/AuthContext'
 import { Modal } from '../components/common/Modal'
@@ -10,6 +10,18 @@ function todayISO() {
   const d = new Date()
   d.setHours(0, 0, 0, 0)
   return d.toISOString().slice(0, 10)
+}
+
+function addMonths(dateStr, months) {
+  const norm = normalizeDateString(dateStr)
+  if (!norm) return ''
+  const [y, m, d] = norm.split('-')
+  const base = new Date(Number(y), Number(m) - 1, Number(d))
+  base.setMonth(base.getMonth() + Number(months || 0))
+  const ny = base.getFullYear()
+  const nm = String(base.getMonth() + 1).padStart(2, '0')
+  const nd = String(base.getDate()).padStart(2, '0')
+  return `${ny}-${nm}-${nd}`
 }
 
 export function Reportes() {
@@ -30,6 +42,15 @@ export function Reportes() {
 
   const [openConfirm, setOpenConfirm] = useState(false)
   const [confirmMsg, setConfirmMsg] = useState('')
+
+  // Estados para renovación
+  const [openRenovacion, setOpenRenovacion] = useState(false)
+  const [ventaRenovando, setVentaRenovando] = useState(null)
+  const [mesesRenovacion, setMesesRenovacion] = useState(1)
+  const [fechaManualRenovacion, setFechaManualRenovacion] = useState('')
+  const [montoRenovacion, setMontoRenovacion] = useState('')
+  const [savingRenovacion, setSavingRenovacion] = useState(false)
+  const [renovacionError, setRenovacionError] = useState(null)
 
   async function fetchData() {
     setLoading(true)
@@ -155,10 +176,115 @@ export function Reportes() {
       return
     }
 
-    setConfirmMsg('Credenciales actualizadas. La cuenta quedó liberada y la venta se mantuvo como historial (no se descuenta el dinero).')
+    setConfirmMsg('Credenciales actualizadas. La cuenta quedó liberada y ahora la puedes volver a vender.')
     setOpenConfirm(true)
 
     resetModal()
+    await fetchData()
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('reportes-updated'))
+    }
+  }
+
+  function openRenovacionModal(venta) {
+    setVentaRenovando(venta)
+    const baseMonto = Number(venta.monto || 0)
+    setMesesRenovacion(1)
+    setMontoRenovacion(baseMonto ? baseMonto.toFixed(2) : '')
+    setFechaManualRenovacion('')
+    setRenovacionError(null)
+    setOpenRenovacion(true)
+  }
+
+  function resetRenovacionModal() {
+    setOpenRenovacion(false)
+    setVentaRenovando(null)
+    setMesesRenovacion(1)
+    setFechaManualRenovacion('')
+    setMontoRenovacion('')
+    setSavingRenovacion(false)
+    setRenovacionError(null)
+  }
+
+  async function handleRenovacionSubmit(e) {
+    e.preventDefault()
+    setRenovacionError(null)
+    if (!ventaRenovando) return
+
+    const meses = Number(mesesRenovacion) || 1
+    const monto = parseFloat(montoRenovacion)
+    if (!monto || monto <= 0) {
+      setRenovacionError('El monto de la renovación debe ser mayor a 0')
+      return
+    }
+
+    // Toma la fecha de vencimiento original como base
+    const fechaVencimientoOriginal = normalizeDateString(ventaRenovando.fecha_vencimiento) || todayISO()
+
+    // La nueva fecha de inicio es la fecha de vencimiento anterior
+    const fechaInicioRenov = fechaVencimientoOriginal
+    // La nueva fecha de vencimiento se calcula desde la fecha de vencimiento anterior + meses
+    const fechaVencimientoRenov = fechaManualRenovacion || addMonths(fechaVencimientoOriginal, meses)
+
+    setSavingRenovacion(true)
+
+    // Actualizar la venta: nuevas fechas, nuevo monto, y quitarle el flag liberada
+    const { data, error } = await supabase
+      .from('ventas')
+      .update({
+        monto,
+        fecha_inicio: fechaInicioRenov,
+        fecha_vencimiento: fechaVencimientoRenov,
+        liberada: false, // La venta vuelve a estar activa
+      })
+      .eq('id', ventaRenovando.id)
+      .select(`
+        id,
+        cliente_id,
+        cuenta_servicio_id,
+        perfil_id,
+        fecha_venta,
+        fecha_inicio,
+        fecha_vencimiento,
+        monto,
+        liberada
+      `)
+      .single()
+
+    setSavingRenovacion(false)
+
+    if (error) {
+      setRenovacionError(error.message)
+      return
+    }
+
+    // Registrar ingreso de renovación (para estadísticas)
+    try {
+      await supabase.from('pagos_ventas').insert({
+        user_id: user.id,
+        venta_id: data.id,
+        monto: monto,
+        fecha_pago: new Date().toISOString(),
+        tipo: 'renovacion',
+      })
+    } catch (e) {
+      console.warn('No se pudo registrar pago_renovacion (tabla pagos_ventas no existe o falta permisos).', e)
+    }
+
+    // Enviar notificación
+    try {
+      await supabase.functions.invoke('send-notifications', {
+        body: { ventaId: data.id, motivo: 'renovacion' },
+      })
+    } catch (e) {
+      console.error('Error enviando notificación de renovación', e)
+    }
+
+    setConfirmMsg('Venta renovada exitosamente. Ahora volverá a aparecer en la página de Ventas con las nuevas fechas.')
+    setOpenConfirm(true)
+
+    resetRenovacionModal()
     await fetchData()
 
     if (typeof window !== 'undefined') {
@@ -192,7 +318,8 @@ export function Reportes() {
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-        <table className="min-w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="min-w-[900px] w-full text-sm">
           <thead className="bg-gradient-to-r from-slate-700 via-slate-600 to-slate-700">
             <tr>
               <th className="px-4 py-4 text-center font-bold text-white uppercase tracking-wide text-xs">#</th>
@@ -255,21 +382,34 @@ export function Reportes() {
                   <td className="px-4 py-4 text-center text-slate-700 font-medium">
                     {formatDateDisplay(r.fecha_vencimiento)}
                   </td>
-                  <td className="px-4 py-4 text-center">
-                    <button
-                      type="button"
-                      onClick={() => openEditModal(r)}
-                      className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm text-xs font-semibold"
-                    >
-                      <Edit2 size={16} />
-                      Cambiar credenciales
-                    </button>
+                  <td className="px-4 py-4">
+                    <div className="flex items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openRenovacionModal(r)}
+                        className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors shadow-sm text-xs font-semibold"
+                        title="Renovar venta"
+                      >
+                        <RefreshCw size={16} />
+                        Renovar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(r)}
+                        className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm text-xs font-semibold"
+                        title="Cambiar credenciales y liberar"
+                      >
+                        <Edit2 size={16} />
+                        Liberar
+                      </button>
+                    </div>
                   </td>
                 </tr>
               )
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       <Modal open={openEdit} title="Actualizar credenciales" onClose={resetModal}>
@@ -312,6 +452,109 @@ export function Reportes() {
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
             >
               {saving ? 'Guardando...' : 'Guardar y liberar'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        open={openRenovacion}
+        title="Renovación de venta vencida"
+        onClose={resetRenovacionModal}
+      >
+        <form className="space-y-4" onSubmit={handleRenovacionSubmit}>
+          {ventaRenovando && (
+            <div className="text-xs text-slate-600 space-y-1 bg-slate-50 p-3 rounded-lg border border-slate-200">
+              <p>
+                <span className="font-semibold">Cliente:</span>{' '}
+                {ventaRenovando.clientes
+                  ? `${ventaRenovando.clientes.nombre} ${ventaRenovando.clientes.apellido}`
+                  : '—'}
+              </p>
+              <p>
+                <span className="font-semibold">Cuenta:</span>{' '}
+                {ventaRenovando.cuentas_servicios?.correo || '—'}
+              </p>
+              <p>
+                <span className="font-semibold">Venció el:</span>{' '}
+                {formatDateDisplay(ventaRenovando.fecha_vencimiento)}
+              </p>
+            </div>
+          )}
+
+          <p className="text-xs text-slate-600">
+            Al renovar, la fecha de inicio será la fecha de vencimiento anterior y se contarán los meses desde ahí. La venta volverá a la página de Ventas como activa.
+          </p>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-600">Meses a renovar</span>
+              <select
+                value={mesesRenovacion}
+                onChange={(e) => {
+                  const value = Number(e.target.value) || 1
+                  setMesesRenovacion(value)
+                  if (ventaRenovando) {
+                    const baseMonto = Number(ventaRenovando.monto || 0)
+                    if (baseMonto > 0) {
+                      setMontoRenovacion((baseMonto * value).toFixed(2))
+                    }
+                  }
+                }}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value={1}>1 mes</option>
+                <option value={2}>2 meses</option>
+                <option value={3}>3 meses</option>
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-600">
+                Fecha de vencimiento (opcional, manual)
+              </span>
+              <input
+                type="date"
+                value={fechaManualRenovacion}
+                onChange={(e) => setFechaManualRenovacion(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-slate-400">
+                Si no eliges una fecha, se calculará desde la fecha de vencimiento original sumando los meses seleccionados.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium text-slate-600">Monto de renovación</span>
+              <input
+                type="number"
+                step="0.01"
+                value={montoRenovacion}
+                onChange={(e) => setMontoRenovacion(e.target.value)}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-slate-400">
+                Por defecto es el precio original multiplicado por los meses seleccionados.
+              </p>
+            </div>
+          </div>
+
+          {renovacionError && <p className="text-sm text-rose-500">{renovacionError}</p>}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={resetRenovacionModal}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={savingRenovacion}
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {savingRenovacion ? 'Guardando...' : 'Registrar renovación'}
             </button>
           </div>
         </form>

@@ -20,7 +20,28 @@ export function capitalizeWords(text) {
   return text
     .trim()
     .split(' ')
-    .filter(word => word.length > 0)
-    .map(word => capitalize(word))
+    .filter((word) => word.length > 0)
+    .map((word) => capitalize(word))
     .join(' ')
+}
+
+/**
+ * Intenta inferir un service_key estándar (netflix, max, disney, prime, spotify, youtube, etc.)
+ * a partir del nombre libre del servicio.
+ */
+export function inferServiceKeyFromName(name) {
+  const n = String(name || '').toLowerCase()
+
+  if (!n) return null
+  if (n.includes('netflix')) return 'netflix'
+  if (n.includes('disney')) return 'disney'
+  if (n.includes('max')) return 'max'
+  if (n.includes('prime')) return 'prime'
+  if (n.includes('spotify')) return 'spotify'
+  if (n.includes('youtube') || n.includes('you tube') || n.includes('yt ')) return 'youtube'
+  if (n.includes('vix')) return 'vix'
+  if (n.includes('paramount')) return 'paramount'
+  if (n.includes('crunchy')) return 'crunchyroll'
+
+  return null
 }
