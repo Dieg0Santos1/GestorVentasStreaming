@@ -7,6 +7,9 @@ import { formatMoney } from '../../lib/money'
 export function StatCards() {
   const { user } = useAuth()
   const currency = useCurrency()
+  // Usamos el ID del usuario logueado; si no hay sesión (p.ej. build estático de vista pública),
+  // caemos al OWNER_ID configurado.
+  const TENANT_ID = user?.id || import.meta.env.VITE_OWNER_ID
 
   const [gananciaMes, setGananciaMes] = useState(0)
   const [totalClientes, setTotalClientes] = useState(0)
@@ -17,81 +20,145 @@ export function StatCards() {
 
   const [serviciosCuentas, setServiciosCuentas] = useState([])
   const [selectedServicioId, setSelectedServicioId] = useState('all')
+  const [periodoGanancia, setPeriodoGanancia] = useState('mes') // 'hoy' | 'semana' | 'mes' | 'año'
 
-  const monthLabel = useMemo(() => {
+  const periodoLabel = useMemo(() => {
     const now = new Date()
-    return now.toLocaleDateString('es-ES', { month: 'long' })
-  }, [])
+    switch (periodoGanancia) {
+      case 'hoy':
+        return now.toLocaleDateString('es-ES', { day: 'numeric', month: 'long' })
+      case 'semana':
+        const inicioSemana = new Date(now)
+        inicioSemana.setDate(now.getDate() - now.getDay() + 1) // Lunes
+        const finSemana = new Date(inicioSemana)
+        finSemana.setDate(inicioSemana.getDate() + 6) // Domingo
+        return `${inicioSemana.getDate()}/${inicioSemana.getMonth() + 1} - ${finSemana.getDate()}/${finSemana.getMonth() + 1}`
+      case 'mes':
+        return now.toLocaleDateString('es-ES', { month: 'long' })
+      case 'año':
+        return now.getFullYear().toString()
+      default:
+        return ''
+    }
+  }, [periodoGanancia])
 
   useEffect(() => {
-    if (!user?.id) return
+    if (!TENANT_ID) return
 
-    async function fetchStats() {
+    let cancelled = false
+
+    const fetchStats = async () => {
       setLoading(true)
       setError(null)
 
-      const [ventasRes, clientesRes, cuentasRes, proveedoresRes, pagosRes, gastosRes] = await Promise.all([
-        // Fallback de ingresos (si no hay pagos_ventas)
+      const now = new Date()
+      let start = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+      let end
+
+      switch (periodoGanancia) {
+        case 'hoy':
+          end = new Date(start)
+          end.setDate(start.getDate() + 1)
+          break
+        case 'semana': {
+          const dayOfWeek = now.getDay()
+          const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek // lunes como inicio
+          start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diff)
+          end = new Date(start)
+          end.setDate(start.getDate() + 7)
+          break
+        }
+        case 'mes':
+          start = new Date(now.getFullYear(), now.getMonth(), 1)
+          end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+          break
+        case 'año':
+          start = new Date(now.getFullYear(), 0, 1)
+          end = new Date(now.getFullYear() + 1, 0, 1)
+          break
+        default:
+          start = new Date(now.getFullYear(), now.getMonth(), 1)
+          end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+      }
+
+      const startIso = start.toISOString()
+      const endIso = end.toISOString()
+
+      const [ventasRes, pagosRes, gastosRes, clientesRes, cuentasRes, proveedoresRes] = await Promise.all([
         supabase
           .from('ventas')
-          .select('monto, fecha_venta')
-          .eq('user_id', user.id),
-        supabase
-          .from('clientes')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', user.id),
-        supabase
-          .from('cuentas_servicios')
-          .select('id, servicio_id, precio_compra, fecha_inicio, servicios (id, nombre)')
-          .eq('user_id', user.id),
-        supabase
-          .from('proveedores')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', user.id),
-        // pagos_ventas: ingresos reales (incluye renovaciones). Si no existe, usamos ventas como fallback.
+          .select('id, monto, fecha_venta')
+          .eq('user_id', TENANT_ID)
+          .gte('fecha_venta', startIso)
+          .lt('fecha_venta', endIso),
         supabase
           .from('pagos_ventas')
-          .select('monto, fecha_pago')
-          .eq('user_id', user.id),
-        // gastos_cuentas: gastos reales (compra inicial + renovaciones de cuentas con proveedor).
+          .select('user_id, venta_id, monto, fecha_pago, tipo')
+          .eq('user_id', TENANT_ID),
         supabase
           .from('gastos_cuentas')
           .select('monto, fecha_gasto')
-          .eq('user_id', user.id),
+          .eq('user_id', TENANT_ID)
+          .gte('fecha_gasto', startIso)
+          .lt('fecha_gasto', endIso),
+        supabase
+          .from('clientes')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', TENANT_ID),
+        supabase
+          .from('cuentas_servicios')
+          .select('id, servicio_id, precio_compra, fecha_inicio, servicios (id, nombre)')
+          .eq('user_id', TENANT_ID),
+        supabase
+          .from('proveedores')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', TENANT_ID),
       ])
 
-      // Ganancia del mes actual = ingresos del mes - gastos del mes
-      const now = new Date()
-      const start = new Date(now.getFullYear(), now.getMonth(), 1)
-      const end = new Date(now.getFullYear(), now.getMonth() + 1, 1)
-
-      const inMonth = (fecha) => {
-        if (!fecha) return false
-        const d = new Date(fecha)
-        return d >= start && d < end
+      const normalizeToDate = (fecha) => {
+        if (!fecha) return null
+        if (fecha instanceof Date) {
+          const d = new Date(fecha)
+          d.setHours(12, 0, 0, 0)
+          return d
+        }
+        if (typeof fecha === 'string') {
+          let f = fecha.trim()
+          if (!f.includes('T') && f.includes(' ')) f = f.replace(' ', 'T')
+          // Normalizar zona horaria: +00 -> Z, +0000 -> +00:00, +05 -> +05:00
+          f = f.replace(/\+00(?=$)/, 'Z')
+          f = f.replace(/([+-]\d{2})(\d{2})$/, '$1:$2')
+          f = f.replace(/([+-]\d{2})$/, '$1:00')
+          let d = new Date(f)
+          if (Number.isNaN(d.getTime())) {
+            d = new Date(f + 'Z') // último intento
+          }
+          if (Number.isNaN(d.getTime())) return null
+          d.setHours(12, 0, 0, 0)
+          return d
+        }
+        return null
       }
 
-      const ingresosData = (pagosRes && !pagosRes.error && (pagosRes.data || []).length > 0)
-        ? (pagosRes.data || []).map((p) => ({ fecha: p.fecha_pago, monto: p.monto }))
-        : (ventasRes.data || []).map((v) => ({ fecha: v.fecha_venta, monto: v.monto }))
-
-      const ingresosMes = ingresosData
-        .filter((x) => inMonth(x.fecha))
-        .reduce((acc, x) => acc + (Number(x.monto) || 0), 0)
-
-      let gastosMes = 0
-
-      if (gastosRes && !gastosRes.error && (gastosRes.data || []).length > 0) {
-        gastosMes = (gastosRes.data || [])
-          .filter((g) => inMonth(g.fecha_gasto))
-          .reduce((acc, g) => acc + (Number(g.monto) || 0), 0)
-      } else {
-        gastosMes = (cuentasRes.data || [])
-          .filter((c) => inMonth(c.fecha_inicio))
-          .reduce((acc, c) => acc + (Number(c.precio_compra) || 0), 0)
+      const inPeriod = (fecha) => {
+        const d = normalizeToDate(fecha)
+        return d && d >= start && d < end
       }
 
-      setGananciaMes(ingresosMes - gastosMes)
+      const pagosData = pagosRes?.data || []
+      const pagosSet = new Set(pagosData.map((p) => p.venta_id).filter(Boolean))
+      const ventasData = ventasRes?.data || []
+
+      const ingresosPeriodo =
+        pagosData
+          .filter((p) => inPeriod(p.fecha_pago))
+          .reduce((acc, p) => acc + (Number(p.monto) || 0), 0) +
+        ventasData
+          .filter((v) => !pagosSet.has(v.id) && inPeriod(v.fecha_venta))
+          .reduce((acc, v) => acc + (Number(v.monto) || 0), 0)
+
+      // Mostrar ingreso bruto del periodo (sumar columna monto)
+      setGananciaMes(ingresosPeriodo)
 
       if (clientesRes.error) {
         setError((prev) => prev || clientesRes.error.message)
@@ -127,11 +194,20 @@ export function StatCards() {
         setTotalProveedores(proveedoresRes.count || 0)
       }
 
-      setLoading(false)
+      if (!cancelled) {
+        setLoading(false)
+      }
     }
 
     fetchStats()
-  }, [user?.id])
+    const onUpdate = () => fetchStats()
+    window.addEventListener('pagos-updated', onUpdate)
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('pagos-updated', onUpdate)
+    }
+  }, [TENANT_ID, periodoGanancia])
 
   const gananciaMesFormatted = formatMoney(gananciaMes, currency, {
     maximumFractionDigits: 2,
@@ -144,11 +220,11 @@ export function StatCards() {
 
   const cards = [
     {
-      label: `Ganancia Por Mes (${monthLabel})`,
+      label: `Ganancia Total (${periodoLabel})`,
       value: loading ? '—' : gananciaMesFormatted,
       color: 'bg-blue-600',
       icon: '💰',
-      type: 'ganancia-mes',
+      type: 'ganancia',
     },
     {
       label: 'Total Clientes',
@@ -188,6 +264,51 @@ export function StatCards() {
               {card.value}
             </p>
 
+            {card.type === 'ganancia' && (
+              <div className="mt-3 flex flex-wrap gap-1">
+                <button
+                  onClick={() => setPeriodoGanancia('hoy')}
+                  className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                    periodoGanancia === 'hoy'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Hoy
+                </button>
+                <button
+                  onClick={() => setPeriodoGanancia('semana')}
+                  className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                    periodoGanancia === 'semana'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Semana
+                </button>
+                <button
+                  onClick={() => setPeriodoGanancia('mes')}
+                  className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                    periodoGanancia === 'mes'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Mes
+                </button>
+                <button
+                  onClick={() => setPeriodoGanancia('año')}
+                  className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                    periodoGanancia === 'año'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  Año
+                </button>
+              </div>
+            )}
+
             {card.type === 'cuentas' && (
               <div className="mt-3 space-y-1">
                 <div className="flex items-center gap-2">
@@ -213,7 +334,7 @@ export function StatCards() {
               </div>
             )}
 
-            {error && card.type === 'ganancia-mes' && !loading && (
+            {error && card.type === 'ganancia' && !loading && (
               <p className="mt-2 text-[11px] text-rose-500">{error}</p>
             )}
           </div>

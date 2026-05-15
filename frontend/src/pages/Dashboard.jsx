@@ -26,6 +26,8 @@ function getEstadoVenta(fechaVencimiento) {
 export function Dashboard() {
   const { user } = useAuth()
   const currency = useCurrency()
+  // Preferimos el id del usuario logueado; si no hay sesión, caemos al OWNER_ID.
+  const TENANT_ID = user?.id || import.meta.env.VITE_OWNER_ID
 
   const [ventas, setVentas] = useState([])
   const [pagosVentas, setPagosVentas] = useState([])
@@ -38,7 +40,7 @@ export function Dashboard() {
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    if (!user?.id) return
+    if (!TENANT_ID) return
 
     async function fetchDashboardData() {
       setLoading(true)
@@ -48,24 +50,24 @@ export function Dashboard() {
         supabase
           .from('ventas')
           .select('id, monto, fecha_venta, fecha_vencimiento, cuenta_servicio_id')
-          .eq('user_id', user.id)
+          .eq('user_id', TENANT_ID)
           .order('fecha_venta', { ascending: true }),
         supabase
           .from('cuentas_servicios')
           .select('id, servicio_id, precio_compra, fecha_inicio, servicios (id, nombre)')
-          .eq('user_id', user.id),
+          .eq('user_id', TENANT_ID),
         // pagos_ventas es la fuente de ingresos reales (incluye renovaciones).
         // Si no existe la tabla, lo manejamos con fallback abajo.
         supabase
           .from('pagos_ventas')
-          .select('id, monto, fecha_pago')
-          .eq('user_id', user.id)
+          .select('id, venta_id, monto, fecha_pago')
+          .eq('user_id', TENANT_ID)
           .order('fecha_pago', { ascending: true }),
         // gastos_cuentas: registro explícito de gastos (compra inicial + renovaciones con proveedor).
         supabase
           .from('gastos_cuentas')
-          .select('id, monto, fecha_gasto')
-          .eq('user_id', user.id)
+          .select('id, cuenta_servicio_id, monto, fecha_gasto, tipo')
+          .eq('user_id', TENANT_ID)
           .order('fecha_gasto', { ascending: true }),
       ])
 
@@ -114,7 +116,7 @@ export function Dashboard() {
     }
 
     fetchDashboardData()
-  }, [user?.id])
+  }, [TENANT_ID])
 
   const monthlyBalance = useMemo(() => {
     const now = new Date()
@@ -130,14 +132,36 @@ export function Dashboard() {
       map.set(key, buckets[buckets.length - 1])
     }
 
-    // Ventas (ingresos): usar pagos_ventas; fallback a ventas si no hay datos.
-    const ingresos = (pagosVentas && pagosVentas.length > 0)
-      ? pagosVentas.map((p) => ({ fecha: p.fecha_pago, monto: p.monto }))
-      : ventas.map((v) => ({ fecha: v.fecha_venta, monto: v.monto }))
+    const normalizeToDate = (fecha) => {
+      if (!fecha) return null
+      if (fecha instanceof Date) {
+        const d = new Date(fecha)
+        d.setHours(12, 0, 0, 0)
+        return d
+      }
+      if (typeof fecha === 'string') {
+        let f = fecha.trim()
+        if (!f.includes('T') && f.includes(' ')) f = f.replace(' ', 'T')
+        const d = new Date(f)
+        if (Number.isNaN(d.getTime())) return null
+        d.setHours(12, 0, 0, 0)
+        return d
+      }
+      return null
+    }
+
+    // Ventas (ingresos): usamos pagos_ventas; sumamos ventas que no tengan pago asociado para evitar duplicados.
+    const pagosSet = new Set((pagosVentas || []).map((p) => p.venta_id).filter(Boolean))
+    const ingresos = [
+      ...(pagosVentas || []).map((p) => ({ fecha: p.fecha_pago, monto: p.monto })),
+      ...ventas
+        .filter((v) => !pagosSet.has(v.id))
+        .map((v) => ({ fecha: v.fecha_venta, monto: v.monto })),
+    ]
 
     for (const p of ingresos) {
-      if (!p.fecha) continue
-      const fecha = new Date(p.fecha)
+      const fecha = normalizeToDate(p.fecha)
+      if (!fecha) continue
       if (fecha.getFullYear() !== year) continue
       const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
       if (map.has(key)) {
@@ -148,29 +172,35 @@ export function Dashboard() {
     // Gastos:
     // 1) Preferimos registros explícitos en gastos_cuentas (compra inicial + renovaciones).
     // 2) Si no hay datos, usamos como fallback precio_compra/fecha_inicio de las cuentas.
-    if (gastosCuentas && gastosCuentas.length > 0) {
-      for (const g of gastosCuentas) {
-        const monto = Number(g.monto)
-        if (!monto || monto <= 0) continue
-        if (!g.fecha_gasto) continue
-        const fecha = new Date(g.fecha_gasto)
-        if (fecha.getFullYear() !== year) continue
-        const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
-        if (map.has(key)) {
-          map.get(key).gastos += monto
-        }
+    const cuentasConCompraRegistrada = new Set()
+
+    for (const g of gastosCuentas || []) {
+      const monto = Number(g.monto)
+      if (!monto || monto <= 0) continue
+      const fecha = normalizeToDate(g.fecha_gasto)
+      if (!fecha) continue
+
+      if (g.tipo === 'compra' && g.cuenta_servicio_id) {
+        cuentasConCompraRegistrada.add(g.cuenta_servicio_id)
       }
-    } else {
-      for (const c of cuentas) {
-        const monto = Number(c.precio_compra)
-        if (!monto || monto <= 0) continue
-        if (!c.fecha_inicio) continue
-        const fecha = new Date(c.fecha_inicio)
-        if (fecha.getFullYear() !== year) continue
-        const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
-        if (map.has(key)) {
-          map.get(key).gastos += monto
-        }
+
+      if (fecha.getFullYear() !== year) continue
+      const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
+      if (map.has(key)) {
+        map.get(key).gastos += monto
+      }
+    }
+
+    for (const c of cuentas) {
+      if (cuentasConCompraRegistrada.has(c.id)) continue
+      const monto = Number(c.precio_compra)
+      if (!monto || monto <= 0) continue
+      const fecha = normalizeToDate(c.fecha_inicio)
+      if (!fecha) continue
+      if (fecha.getFullYear() !== year) continue
+      const key = `${fecha.getFullYear()}-${fecha.getMonth()}`
+      if (map.has(key)) {
+        map.get(key).gastos += monto
       }
     }
 

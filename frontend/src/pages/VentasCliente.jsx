@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, Edit2, Trash2, Plus, RefreshCw, SendHorizontal, MessageCircle } from 'lucide-react'
 import { FilterableSelect } from '../components/common/FilterableSelect'
@@ -10,6 +10,7 @@ import { useCurrency } from '../hooks/useCurrency'
 import { formatMoney } from '../lib/money'
 import { openWhatsApp, validateWhatsAppPhone } from '../lib/whatsapp'
 import { inferServiceKeyFromName } from '../lib/textUtils'
+import { sendVentaAutomaticNotification } from '../lib/ventaNotifications'
 import * as XLSX from 'xlsx'
 
 function normalizeDateString(value) {
@@ -92,7 +93,7 @@ function getEstadoVenta(fechaVence) {
     return { label: 'Vencida', color: 'text-rose-700 bg-rose-100 border-rose-300' }
   } else if (diffDays === 0) {
     return { label: 'Vencido', color: 'text-rose-700 bg-rose-100 border-rose-300' }
-  } else if (diffDays <= 2) {
+  } else if (diffDays <= 1) {
     return { label: 'Por Vencer', color: 'text-amber-700 bg-amber-100 border-amber-300' }
   } else {
     return { label: 'Vigente', color: 'text-emerald-700 bg-emerald-100 border-emerald-300' }
@@ -103,6 +104,7 @@ export function VentasCliente() {
   const { clienteId } = useParams()
   const { user } = useAuth()
   const currency = useCurrency()
+  const tenantId = user?.id || import.meta.env.VITE_OWNER_ID
   const location = useLocation()
   const navigate = useNavigate()
   const clienteState = location.state?.cliente
@@ -161,6 +163,7 @@ export function VentasCliente() {
   const [renovacionError, setRenovacionError] = useState(null)
   const [sendingVentaId, setSendingVentaId] = useState(null)
   const [sendingGeneral, setSendingGeneral] = useState(false)
+  const ventaSubmitLockRef = useRef(false)
 
   async function cleanupVentasVencidasCliente() {
     // Antes se borraban ventas vencidas automáticamente.
@@ -347,6 +350,7 @@ export function VentasCliente() {
 
   async function handleSubmitNuevaVenta(e) {
     e.preventDefault()
+    if (ventaSubmitLockRef.current) return
     setVentaFormError(null)
 
     if (
@@ -361,8 +365,10 @@ export function VentasCliente() {
       return
     }
 
+    ventaSubmitLockRef.current = true
     setSaving(true)
 
+    try {
     const { data, error } = await supabase
       .from('ventas')
       .insert({
@@ -395,8 +401,6 @@ export function VentasCliente() {
       `)
       .single()
 
-    setSaving(false)
-
     if (error) {
       setVentaFormError(error.message)
       return
@@ -408,7 +412,7 @@ export function VentasCliente() {
     // Nota: requiere tabla pagos_ventas en Supabase.
     try {
       await supabase.from('pagos_ventas').insert({
-        user_id: user.id,
+        user_id: tenantId,
         venta_id: data.id,
         monto: Number(data.monto) || 0,
         fecha_pago: new Date().toISOString(),
@@ -420,20 +424,22 @@ export function VentasCliente() {
     }
 
     try {
-      await supabase.functions.invoke('send-notifications', {
-        body: {
-          ventaId: data.id,
-          motivo: 'nueva_venta',
-          perfilId: data.perfil_id || null,
-        },
+      await sendVentaAutomaticNotification({
+        supabase,
+        venta: ventaEnriquecida,
+        motivo: 'nueva_venta',
       })
     } catch (e) {
-      console.error('Error enviando notificación de nueva venta (cliente)', e)
+      console.error('Error enviando mensaje automatico de nueva venta (cliente)', e)
     }
 
     setVentas((prev) => [ventaEnriquecida, ...prev])
     resetVentaForm()
     setOpenNewVenta(false)
+    } finally {
+      ventaSubmitLockRef.current = false
+      setSaving(false)
+    }
   }
 
   const ventasFiltradas = useMemo(
@@ -533,70 +539,14 @@ export function VentasCliente() {
     setSendingVentaId(venta.id)
 
     try {
-      const telefono = cliente?.telefono
-      const phoneValidation = validateWhatsAppPhone(telefono)
-      if (!phoneValidation.ok) {
-        window.alert(phoneValidation.message)
-        return
-      }
-
-      const cuenta = venta?.cuentas_servicios
-      const servicioNombre = cuenta?.servicios?.nombre || 'Servicio'
-      const serviceKey = inferServiceKeyFromName(servicioNombre)
-      const ocultarCredenciales = serviceKey === 'spotify' || serviceKey === 'youtube'
-
-      const { data: configData } = await supabase
-        .from('configuraciones_usuario')
-        .select('nombre_negocio')
-        .eq('user_id', user.id)
-        .maybeSingle()
-
-      const empresa = configData?.nombre_negocio || 'Ventas Pro'
-      const clienteNombre = cliente ? `${cliente.nombre} ${cliente.apellido}` : 'cliente'
-
-      const fechaVence = venta?.fecha_vencimiento || null
-      const estado = getEstadoVenta(fechaVence)
-      const estadoLabel = (estado?.label || '').toLowerCase()
-
-      const tipo = venta?.perfil_id ? 'Perfil' : 'Cuenta completa'
-      const perfilLine = venta?.perfil_id
-        ? `Perfil: ${venta?.perfil_info?.numero ? `#${venta.perfil_info.numero}` : ''}${venta?.perfil_info?.nombre ? ` (${venta.perfil_info.nombre})` : ''}`.trim()
-        : null
-      const pinLine = venta?.perfil_id
-        ? `Pin: ${venta?.perfil_info?.pin || 'Ninguno'}`
-        : null
-
-      const datosAcceso = [
-        `Servicio: ${servicioNombre}`,
-        `Tipo: ${tipo}`,
-        !ocultarCredenciales ? `Cuenta: ${cuenta?.correo || '—'}` : null,
-        !ocultarCredenciales ? `Contraseña: ${cuenta?.contrasena || '—'}` : null,
-        perfilLine,
-        pinLine,
-        `Vence: ${formatDateDisplay(fechaVence)}`,
-        `Monto: ${formatMoney(venta?.monto || 0, currency, { maximumFractionDigits: 2 })}`,
-      ]
-        .filter(Boolean)
-        .join('\n')
-
-      let msg = ''
-      if (estadoLabel === 'vigente') {
-        msg = `Hola ${clienteNombre}!\n\nTe saluda ${empresa}. Gracias por tu compra.\n\n${datosAcceso}`
-      } else if (estadoLabel === 'por vencer') {
-        msg = `Hola ${clienteNombre}!\n\nTe saluda ${empresa}. Recordatorio: tu acceso vencerá pronto.\n\n${datosAcceso}\n\n¿Desea renovar?`
-      } else if (estadoLabel === 'vencido') {
-        msg = `Hola ${clienteNombre}!\n\nTe saluda ${empresa}. Hoy vence tu acceso. Gracias por tu compra y confianza.\n\n${datosAcceso}\n\n¿Desea renovar?`
-      } else {
-        msg = `Hola ${clienteNombre}!\n\nTe saluda ${empresa}.\n\n${datosAcceso}`
-      }
-
-      const ok = openWhatsApp(telefono, msg)
-      if (!ok) {
-        window.alert('No se pudo abrir WhatsApp. Revisa el número del cliente.')
-      }
+      await sendVentaAutomaticNotification({
+        supabase,
+        venta,
+        motivo: 'manual',
+      })
     } catch (e) {
-      console.error('Error generando WhatsApp para la venta (cliente)', e)
-      window.alert('Ocurrió un error preparando el WhatsApp.')
+      console.error('Error enviando mensaje automatico para la venta (cliente)', e)
+      window.alert(e?.message || 'Ocurrio un error enviando el mensaje automatico.')
     } finally {
       setSendingVentaId(null)
     }
@@ -738,10 +688,19 @@ export function VentasCliente() {
 
     if (credencialesCambiadas) {
       try {
-        await supabase.functions.invoke('send-notifications', {
-          body: {
-            ventaId: ventaEditando.id,
-            motivo: 'cambio_credenciales',
+        await sendVentaAutomaticNotification({
+          supabase,
+          venta: {
+            ...ventaEditando,
+            fecha_vencimiento: normalizeDateString(fechaVencimientoVenta),
+            cuentas_servicios: {
+              ...ventaEditando?.cuentas_servicios,
+              correo: newCorreo,
+              contrasena: newContrasena,
+            },
+          },
+          motivo: 'cambio_credenciales',
+          extra: {
             oldCorreo,
             oldContrasena,
             newCorreo,
@@ -749,7 +708,7 @@ export function VentasCliente() {
           },
         })
       } catch (e) {
-        console.error('Error enviando notificación de cambio de credenciales (cliente)', e)
+        console.error('Error enviando mensaje automatico de cambio de credenciales (cliente)', e)
       }
     }
 
@@ -864,11 +823,13 @@ export function VentasCliente() {
     const [ventaRenovEnriquecida] = await enrichVentasWithPerfilInfo([data])
 
     try {
-      await supabase.functions.invoke('send-notifications', {
-        body: { ventaId: data.id, motivo: 'renovacion' },
+      await sendVentaAutomaticNotification({
+        supabase,
+        venta: ventaRenovEnriquecida,
+        motivo: 'renovacion',
       })
     } catch (e) {
-      console.error('Error enviando notificación de renovación (cliente)', e)
+      console.error('Error enviando mensaje automatico de renovacion (cliente)', e)
     }
 
     setVentas((prev) => prev.map((v) => (v.id === data.id ? ventaRenovEnriquecida : v)))

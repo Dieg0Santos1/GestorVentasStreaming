@@ -337,6 +337,18 @@ export function CuentasServicio() {
       return
     }
 
+    try {
+      await supabase.from('gastos_cuentas').insert({
+        user_id: user.id,
+        cuenta_servicio_id: data.id,
+        monto: precioCompraNum,
+        fecha_gasto: new Date().toISOString(),
+        tipo: 'compra',
+      })
+    } catch (e) {
+      console.warn('No se pudo registrar gasto de compra inicial (gastos_cuentas).', e)
+    }
+
     setCuentas((prev) => [...prev, data])
     resetForm()
     setOpenNewCuenta(false)

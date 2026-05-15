@@ -185,6 +185,7 @@ export function Clientes() {
       .from('ventas')
       .select('id', { count: 'exact', head: true })
       .eq('cliente_id', deleteId)
+      .eq('liberada', false)
 
     if (!ventasError && (count || 0) > 0) {
       const msg = 'No se puede eliminar este cliente porque tiene ventas registradas. Primero gestiona o elimina esas ventas.'

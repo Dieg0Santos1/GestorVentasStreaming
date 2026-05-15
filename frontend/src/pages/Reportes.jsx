@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import { Modal } from '../components/common/Modal'
 import { ConfirmModal } from '../components/common/ConfirmModal'
 import { formatDateDisplay, normalizeDateString } from '../lib/dateUtils'
+import { sendVentaAutomaticNotification } from '../lib/ventaNotifications'
 
 function todayISO() {
   const d = new Date()
@@ -26,6 +27,7 @@ function addMonths(dateStr, months) {
 
 export function Reportes() {
   const { user } = useAuth()
+  const tenantId = user?.id || import.meta.env.VITE_OWNER_ID
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -261,24 +263,62 @@ export function Reportes() {
 
     // Registrar ingreso de renovación (para estadísticas)
     try {
+      const now = new Date()
+      const fechaPagoISO = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        12,
+        0,
+        0,
+      ).toISOString()
       await supabase.from('pagos_ventas').insert({
-        user_id: user.id,
+        user_id: tenantId,
         venta_id: data.id,
         monto: monto,
-        fecha_pago: new Date().toISOString(),
+        fecha_pago: fechaPagoISO,
         tipo: 'renovacion',
       })
     } catch (e) {
       console.warn('No se pudo registrar pago_renovacion (tabla pagos_ventas no existe o falta permisos).', e)
     }
 
-    // Enviar notificación
+        // Enviar mensaje automatico de renovacion
     try {
-      await supabase.functions.invoke('send-notifications', {
-        body: { ventaId: data.id, motivo: 'renovacion' },
-      })
+      const { data: ventaCompleta } = await supabase
+        .from('ventas')
+        .select(`
+          id,
+          cliente_id,
+          cuenta_servicio_id,
+          perfil_id,
+          fecha_venta,
+          fecha_inicio,
+          fecha_vencimiento,
+          monto,
+          liberada,
+          clientes (id, nombre, apellido, telefono),
+          cuentas_servicios (
+            id,
+            correo,
+            contrasena,
+            precio,
+            fecha_vencimiento,
+            servicios (id, nombre)
+          )
+        `)
+        .eq('id', data.id)
+        .single()
+
+      if (ventaCompleta) {
+        await sendVentaAutomaticNotification({
+          supabase,
+          venta: ventaCompleta,
+          motivo: 'renovacion',
+        })
+      }
     } catch (e) {
-      console.error('Error enviando notificación de renovación', e)
+      console.error('Error enviando mensaje automatico de renovacion', e)
     }
 
     setConfirmMsg('Venta renovada exitosamente. Ahora volverá a aparecer en la página de Ventas con las nuevas fechas.')
@@ -289,6 +329,7 @@ export function Reportes() {
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new Event('reportes-updated'))
+      window.dispatchEvent(new Event('pagos-updated'))
     }
   }
 
