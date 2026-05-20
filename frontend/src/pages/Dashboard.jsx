@@ -313,7 +313,13 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <StatCards />
+      <StatCards
+        ventas={ventas}
+        pagosVentas={pagosVentas}
+        cuentas={cuentas}
+        gastosCuentas={gastosCuentas}
+        monthlyBalance={monthlyBalance}
+      />
 
       {/* Balance por mes */}
       <section className="rounded-2xl border border-slate-200 bg-white p-6">
